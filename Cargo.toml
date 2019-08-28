@@ -1,0 +1,23 @@
+[package]
+name = "musicd2"
+version = "0.1.0"
+authors = ["Konsta Kokkinen <kray@i0.fi>"]
+edition = "2018"
+build = "build.rs"
+
+[build-dependencies]
+cc = "1.0"
+
+[dependencies]
+bytes = "0.4.12"
+clap = "2.33.0"
+image = { version = "0.22.1", default-features = false, features = ["gif_codec", "jpeg", "ico", "png_codec", "pnm", "tga", "tiff", "webp", "bmp", "hdr", "dxt"] }
+libc = "0.2.59"
+log = "0.4.8"
+mio = "0.6"
+mio-extras = "2.0.5"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0.0"
+shellexpand = "1.0"
+rusqlite = "0.20.0"
+threadpool = "1.7.1"
