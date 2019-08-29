@@ -445,11 +445,16 @@ impl ServerStreaming {
         }
     }
 
-    pub fn streaming_drain(&self, token: Token) {
+    pub fn streaming_drain(&self, token: Token, data: &[u8]) {
         let inner = &mut *self.handle.inner.lock().unwrap();
 
-        if let Some(InternalClient::Streaming(tcp_stream, out_buf)) = inner.clients.remove(&token) {
+        if let Some(InternalClient::Streaming(tcp_stream, mut out_buf)) =
+            inner.clients.remove(&token)
+        {
             self.handle.poll.deregister(&tcp_stream).unwrap();
+
+            out_buf.extend_from_slice(data);
+
             inner
                 .tx
                 .send(ControlEvent::NewClient(

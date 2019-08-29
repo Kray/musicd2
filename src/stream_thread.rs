@@ -49,7 +49,7 @@ impl StreamThread {
                 let audio_stream = inner
                     .audio_streams
                     .get_mut(&token)
-                    .expect("nonexistent audio stream reported as writable");
+                    .expect("stream_thread nonexistent audio stream reported as writable");
 
                 let mut buf = BytesMut::new();
 
@@ -64,12 +64,12 @@ impl StreamThread {
                     token
                 );
 
-                server.streaming_feed(token, &buf);
-
-                if !result {
+                if result {
+                    server.streaming_feed(token, &buf);
+                } else {
                     debug!("draining audio stream {:?}", token);
 
-                    server.streaming_drain(token);
+                    server.streaming_drain(token, &buf);
                     inner.audio_streams.remove(&token).unwrap();
                 }
             }
