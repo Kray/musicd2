@@ -115,7 +115,8 @@ fn main() {
             if let Some(path) = root_iter.next() {
                 roots.push(config::Root {
                     name: name.to_string(),
-                    path: Path::new(OsStr::from_bytes(path.as_bytes())).to_path_buf(),
+                    path: Path::new(OsStr::from_bytes(shellexpand::tilde(path).as_bytes()))
+                        .to_path_buf(),
                 });
             }
         }
