@@ -144,7 +144,7 @@ impl Scan {
         }
 
         info!(
-            "complete in {}s: {:?}",
+            "done in {}s: {:?}",
             start_instant.elapsed().as_secs(),
             stat
         );

@@ -34,7 +34,6 @@ use store::{Store, StoreSource};
 use stream_thread::StreamThread;
 
 pub struct Musicd {
-    bind: SocketAddr,
     cache_source: CacheSource,
     index_source: IndexSource,
     store_source: StoreSource,
@@ -71,7 +70,7 @@ fn main() {
             Arg::with_name("cache-limit")
                 .long("cache-limit")
                 .help("Maximum cache size in bytes")
-                .default_value(stringify!(100 * 1024 * 1024))
+                .default_value("104857600")
         )
         .arg(
             Arg::with_name("directory")
@@ -141,12 +140,13 @@ fn main() {
         .unwrap()
         .unwrap();
 
+    let bind: SocketAddr = matches
+        .value_of("bind")
+        .unwrap()
+        .parse()
+        .expect("invalid bind address");
+
     let musicd = Arc::new(Musicd {
-        bind: matches
-            .value_of("bind")
-            .unwrap()
-            .parse()
-            .expect("invalid bind address"),
         cache_source,
         index_source,
         store_source,
@@ -162,12 +162,9 @@ fn main() {
     let mut store = musicd.store();
     store.synchronize().unwrap();
 
-    let tcp_listener = mio::net::TcpListener::bind(&musicd.bind).unwrap();
-
     let (server_incoming, server_streaming) = Server::launch_new().unwrap();
-    server_incoming.add_listener(tcp_listener).unwrap();
-
+    
     let stream_thread = Arc::new(StreamThread::launch_new(server_streaming).unwrap());
 
-    http_api::run_api(musicd.clone(), server_incoming, stream_thread.clone());
+    http_api::run_api(musicd.clone(), bind, server_incoming, stream_thread.clone());
 }

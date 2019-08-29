@@ -1,6 +1,7 @@
 use std::error::Error as StdError;
 use std::ffi::OsStr;
 use std::io::{Cursor, Read, Seek, SeekFrom};
+use std::net::SocketAddr;
 use std::os::unix::ffi::OsStrExt;
 use std::sync::Arc;
 
@@ -92,12 +93,17 @@ impl ApiRequest {
 
 pub fn run_api(
     musicd: Arc<crate::Musicd>,
+    bind: SocketAddr,
     server: ServerIncoming,
     stream_thread: Arc<StreamThread>,
 ) {
     let threadpool = ThreadPool::new(4);
-
     let server = Arc::new(server);
+
+    info!("listening on {}", bind);
+
+    let tcp_listener = mio::net::TcpListener::bind(&bind).unwrap();
+    server.add_listener(tcp_listener).unwrap();
 
     loop {
         let (client, request) = server
