@@ -32,14 +32,15 @@ struct ServerHandle {
 }
 
 struct ServerInner {
-    tx: Sender<()>,
+    tx: Sender<ControlEvent>,
     incoming_rx: Receiver<Token>,
-    streaming_rx: Receiver<Token>,
+    streaming_rx: Receiver<StreamingEvent>,
     tokens: Vec<Token>,
     clients: HashMap<Token, InternalClient>,
     join_handle: Option<std::thread::JoinHandle<()>>,
 }
 
+#[derive(Debug)]
 enum InternalClient {
     Listener(TcpListener),
     Incoming(TcpStream, BytesMut),
@@ -47,10 +48,25 @@ enum InternalClient {
     Streaming(TcpStream, BytesMut),
 }
 
+#[derive(Debug)]
 pub enum Receive<T> {
     Receive(T),
     Invalid,
     None,
+}
+
+#[derive(Debug)]
+enum ControlEvent {
+    NewClient(Token, InternalClient),
+    FeedStream(Token),
+    Shutdown,
+}
+
+#[derive(Debug)]
+pub enum StreamingEvent {
+    Ready(Token),
+    Close(Token),
+    Shutdown,
 }
 
 pub struct Server;
@@ -64,11 +80,12 @@ impl Server {
         let incoming_poll = Poll::new()?;
         incoming_poll.register(&incoming_rx, rx_token, Ready::readable(), PollOpt::edge())?;
 
-        let (streaming_tx, streaming_rx) = mio_extras::channel::channel::<Token>();
+        let (streaming_tx, streaming_rx) = mio_extras::channel::channel::<StreamingEvent>();
         let streaming_poll = Poll::new()?;
         streaming_poll.register(&streaming_rx, rx_token, Ready::readable(), PollOpt::edge())?;
 
-        let (server_tx, server_rx) = mio_extras::channel::channel::<()>();
+        let (server_tx, server_rx) = mio_extras::channel::channel::<ControlEvent>();
+        poll.register(&server_rx, rx_token, Ready::readable(), PollOpt::edge())?;
 
         let inner = Arc::new(Mutex::new(ServerInner {
             tx: server_tx,
@@ -98,9 +115,16 @@ impl Server {
         let result_inner = inner.clone();
 
         let join_handle = std::thread::spawn(move || {
+            debug!("started");
+
             let mut events = Events::with_capacity(1024);
 
             loop {
+                {
+                    poll.reregister(&server_rx, rx_token, Ready::readable(), PollOpt::edge())
+                        .unwrap();
+                }
+
                 poll.poll(&mut events, None).unwrap();
 
                 for event in events.iter() {
@@ -109,7 +133,61 @@ impl Server {
                     let inner = &mut *inner.lock().unwrap();
 
                     if token == rx_token {
-                        server_rx.try_recv().unwrap();
+                        match server_rx.try_recv().unwrap() {
+                            ControlEvent::NewClient(token, c) => match &c {
+                                InternalClient::Listener(tcp_listener) => {
+                                    poll.register(
+                                        tcp_listener,
+                                        token,
+                                        Ready::readable(),
+                                        PollOpt::edge(),
+                                    )
+                                    .unwrap();
+                                    inner.clients.insert(token, c);
+                                }
+                                InternalClient::Drain(tcp_stream, _) => {
+                                    poll.register(
+                                        tcp_stream,
+                                        token,
+                                        Ready::writable(),
+                                        PollOpt::edge(),
+                                    )
+                                    .unwrap();
+                                    inner.clients.insert(token, c);
+                                }
+                                InternalClient::Streaming(tcp_stream, _) => {
+                                    poll.register(
+                                        tcp_stream,
+                                        token,
+                                        Ready::writable(),
+                                        PollOpt::edge(),
+                                    )
+                                    .unwrap();
+                                    inner.clients.insert(token, c);
+                                }
+                                _ => {
+                                    unreachable!();
+                                }
+                            },
+                            ControlEvent::FeedStream(token) => {
+                                if let Some(InternalClient::Streaming(tcp_stream, _)) =
+                                    inner.clients.get(&token)
+                                {
+                                    poll.reregister(
+                                        tcp_stream,
+                                        token,
+                                        Ready::writable(),
+                                        PollOpt::edge(),
+                                    )
+                                    .unwrap();
+                                }
+                            }
+                            ControlEvent::Shutdown => {
+                                debug!("shutdown command received");
+                                streaming_tx.send(StreamingEvent::Shutdown).unwrap();
+                                return;
+                            }
+                        }
                         continue;
                     }
 
@@ -185,6 +263,7 @@ impl Server {
                                 Ok(n) => n,
                                 Err(e) => {
                                     error!("tcp write error: {}", e.description());
+                                    streaming_tx.send(StreamingEvent::Close(token)).unwrap();
                                     poll.deregister(tcp_stream).unwrap();
                                     inner.clients.remove(&token);
                                     inner.tokens.push(token);
@@ -197,7 +276,7 @@ impl Server {
                             if out_buf.is_empty() {
                                 poll.reregister(tcp_stream, token, Ready::empty(), PollOpt::edge())
                                     .unwrap();
-                                streaming_tx.send(token).unwrap();
+                                streaming_tx.send(StreamingEvent::Ready(token)).unwrap();
                             }
                         }
                     }
@@ -225,14 +304,13 @@ impl ServerIncoming {
             }
         };
 
-        self.handle
-            .poll
-            .register(&tcp_listener, token, Ready::readable(), PollOpt::edge())
-            .unwrap();
         inner
-            .clients
-            .insert(token, InternalClient::Listener(tcp_listener));
-        inner.tx.send(()).unwrap();
+            .tx
+            .send(ControlEvent::NewClient(
+                token,
+                InternalClient::Listener(tcp_listener),
+            ))
+            .unwrap();
 
         Ok(())
     }
@@ -294,14 +372,13 @@ impl Client {
             }
         };
 
-        self.handle
-            .poll
-            .register(&self.tcp_stream, token, Ready::writable(), PollOpt::edge())
+        inner
+            .tx
+            .send(ControlEvent::NewClient(
+                token,
+                InternalClient::Drain(self.tcp_stream, BytesMut::from(data)),
+            ))
             .unwrap();
-        inner.clients.insert(
-            token,
-            InternalClient::Drain(self.tcp_stream, BytesMut::from(data)),
-        );
 
         Ok(())
     }
@@ -319,43 +396,51 @@ impl Client {
             }
         };
 
-        self.handle
-            .poll
-            .register(&self.tcp_stream, token, Ready::writable(), PollOpt::edge())
-            .unwrap();
         inner
-            .clients
-            .insert(token, InternalClient::Streaming(self.tcp_stream, out_buf));
+            .tx
+            .send(ControlEvent::NewClient(
+                token,
+                InternalClient::Streaming(self.tcp_stream, out_buf),
+            ))
+            .unwrap();
 
         Ok(token)
     }
 }
 
 impl ServerStreaming {
-    pub fn streaming_next(&self) -> Result<Token> {
+    pub fn streaming_next(&self) -> Result<StreamingEvent> {
         let mut events = Events::with_capacity(32);
 
-        self.streaming_poll.poll(&mut events, None)?;
+        {
+            let inner = &mut *self.handle.inner.lock().unwrap();
+            self.streaming_poll.reregister(
+                &inner.streaming_rx,
+                Token(0),
+                Ready::readable(),
+                PollOpt::edge(),
+            )?;
+        }
+
+        self.streaming_poll.poll(&mut events, None).unwrap();
 
         let inner = &mut *self.handle.inner.lock().unwrap();
-        Ok(inner.streaming_rx.try_recv().unwrap())
+        let event = inner.streaming_rx.try_recv().unwrap();
+
+        Ok(event)
     }
 
     pub fn streaming_feed(&self, token: Token, data: &[u8]) {
         let inner = &mut *self.handle.inner.lock().unwrap();
+        if let Some(client) = inner.clients.get_mut(&token) {
+            if let InternalClient::Streaming(_, out_buf) = client {
+                let n = out_buf.len();
 
-        let client = inner.clients.get_mut(&token).unwrap();
-        if let InternalClient::Streaming(tcp_stream, out_buf) = client {
-            let n = out_buf.len();
+                out_buf.extend_from_slice(data);
 
-            out_buf.extend_from_slice(data);
-
-            if n == 0 {
-                self.handle
-                    .poll
-                    .reregister(tcp_stream, token, Ready::writable(), PollOpt::edge())
-                    .unwrap();
-                inner.tx.send(()).unwrap();
+                if n == 0 {
+                    inner.tx.send(ControlEvent::FeedStream(token)).unwrap();
+                }
             }
         }
     }
@@ -363,11 +448,15 @@ impl ServerStreaming {
     pub fn streaming_drain(&self, token: Token) {
         let inner = &mut *self.handle.inner.lock().unwrap();
 
-        let client = inner.clients.remove(&token).unwrap();
-        if let InternalClient::Streaming(tcp_stream, out_buf) = client {
+        if let Some(InternalClient::Streaming(tcp_stream, out_buf)) = inner.clients.remove(&token) {
+            self.handle.poll.deregister(&tcp_stream).unwrap();
             inner
-                .clients
-                .insert(token, InternalClient::Drain(tcp_stream, out_buf));
+                .tx
+                .send(ControlEvent::NewClient(
+                    token,
+                    InternalClient::Drain(tcp_stream, out_buf),
+                ))
+                .unwrap();
         }
     }
 }

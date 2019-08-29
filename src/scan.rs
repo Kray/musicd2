@@ -82,7 +82,7 @@ pub fn scan(index: Index) {
 
 impl Scan {
     fn scan_core(&mut self) -> Result<()> {
-        info!("scan starting");
+        info!("started");
 
         self.index
             .connection()
@@ -124,6 +124,8 @@ impl Scan {
         let start_instant = Instant::now();
 
         for (name, path) in roots {
+            debug!("root '{}' = '{}'", name, path.to_string_lossy());
+
             match self.scan_node(None, Path::new(OsStr::from_bytes(name.as_bytes()))) {
                 Ok(s) => {
                     if let Some(s) = s {
@@ -142,7 +144,7 @@ impl Scan {
         }
 
         info!(
-            "scan complete in {}s: {:?}",
+            "complete in {}s: {:?}",
             start_instant.elapsed().as_secs(),
             stat
         );
@@ -220,7 +222,7 @@ impl Scan {
             Ok(m) => m,
             Err(e) => {
                 error!(
-                    "can't query metadata for '{}': {}",
+                    "metadata error '{}': {}",
                     fs_path.to_string_lossy(),
                     e.description()
                 );
@@ -239,7 +241,7 @@ impl Scan {
         {
             Ok(n) => n.as_secs(),
             Err(_) => {
-                error!("invalid modified for '{}'", fs_path.to_string_lossy());
+                error!("invalid modified '{}'", fs_path.to_string_lossy());
 
                 if let Some(node) = node {
                     self.index.delete_node(node.node_id)?;
@@ -277,6 +279,8 @@ impl Scan {
             }
         };
 
+        // trace!("prepare_node {} = {}", node.node_id, fs_path.to_string_lossy());
+
         Ok(ScanNode {
             node,
             fs_path,
@@ -285,7 +289,7 @@ impl Scan {
     }
 
     fn process_directory_node(&mut self, node: &Node, fs_path: &Path) -> Result<Option<ScanStat>> {
-        debug!("scan directory '{}'", fs_path.to_string_lossy());
+        debug!("directory '{}'", fs_path.to_string_lossy());
 
         let mut stat = ScanStat {
             ..Default::default()
@@ -307,15 +311,8 @@ impl Scan {
         node: &Node,
         fs_path: &Path,
     ) -> Result<Option<ScanStat>> {
-        debug!("scan file '{}'", fs_path.to_string_lossy());
-
-        let extension = match fs_path.extension() {
-            Some(e) => match e.to_str() {
-                Some(e) => e,
-                None => {
-                    return Ok(None);
-                }
-            },
+        let extension = match fs_path.extension().and_then(|e| e.to_str()) {
+            Some(e) => e,
             None => {
                 return Ok(None);
             }
@@ -333,58 +330,9 @@ impl Scan {
             return Ok(Some(stat));
         }
 
+        debug!("no handler found for file '{}'", fs_path.to_string_lossy());
+
         Ok(None)
-    }
-
-    // This list is what extensions image crate recognizes
-    const IMAGE_EXTENSIONS: &'static [&'static str] = &[
-        "jpg", "jpeg", "png", "gif", "webp", "tif", "tiff", "tga", "bmp", "ico", "hdr", "pbm",
-        "pam", "ppm", "pgm",
-    ];
-
-    fn try_process_image_file(
-        &mut self,
-        extension: &str,
-        node: &Node,
-        fs_path: &Path,
-    ) -> Result<Option<ScanStat>> {
-        if !Scan::IMAGE_EXTENSIONS.iter().any(|&e| extension == e) {
-            return Ok(None);
-        }
-
-        let dimensions = match image::image_dimensions(fs_path) {
-            Ok(i) => i,
-            Err(e) => {
-                error!(
-                    "can't open image file '{}': {}",
-                    fs_path.to_string_lossy(),
-                    e.description()
-                );
-                return Ok(None);
-            }
-        };
-
-        let description = match node.name.file_stem() {
-            Some(s) => match s.to_str() {
-                Some(s) => s.to_string(),
-                None => String::new(),
-            },
-            None => String::new(),
-        };
-
-        self.index.create_image(&Image {
-            image_id: 0,
-            node_id: node.node_id,
-            stream_index: None,
-            description,
-            width: i64::from(dimensions.0),
-            height: i64::from(dimensions.1),
-        })?;
-
-        Ok(Some(ScanStat {
-            images: 1,
-            ..Default::default()
-        }))
     }
 
     fn try_process_cue_file(
@@ -392,15 +340,15 @@ impl Scan {
         extension: &str,
         parent: &Node,
         node: &Node,
-        path: &Path,
+        fs_path: &Path,
     ) -> Result<Option<ScanStat>> {
         if extension != "cue" {
             return Ok(None);
         }
 
-        debug!("trying to read cue file '{}'", path.to_string_lossy());
+        debug!("cue file '{}'", fs_path.to_string_lossy());
 
-        let cue_text = std::fs::read_to_string(&path)?;
+        let cue_text = std::fs::read_to_string(&fs_path)?;
         let cue = cue::parse_cue(&cue_text);
 
         if cue.files.is_empty() {
@@ -510,8 +458,63 @@ impl Scan {
         Ok(Some(stat))
     }
 
-    fn try_process_audio_file(&mut self, node: &Node, path: &Path) -> Result<Option<ScanStat>> {
-        let (mut tracks, mut images) = match media_info::media_info_from_path(&path) {
+    // This list is what extensions image crate recognizes
+    const IMAGE_EXTENSIONS: &'static [&'static str] = &[
+        "jpg", "jpeg", "png", "gif", "webp", "tif", "tiff", "tga", "bmp", "ico", "hdr", "pbm",
+        "pam", "ppm", "pgm",
+    ];
+
+    fn try_process_image_file(
+        &mut self,
+        extension: &str,
+        node: &Node,
+        fs_path: &Path,
+    ) -> Result<Option<ScanStat>> {
+        if !Scan::IMAGE_EXTENSIONS.iter().any(|&e| extension == e) {
+            return Ok(None);
+        }
+
+        debug!("image file '{}'", fs_path.to_string_lossy());
+
+        let dimensions = match image::image_dimensions(fs_path) {
+            Ok(i) => i,
+            Err(e) => {
+                error!(
+                    "can't open image file '{}': {}",
+                    fs_path.to_string_lossy(),
+                    e.description()
+                );
+                return Ok(None);
+            }
+        };
+
+        let description = match node.name.file_stem() {
+            Some(s) => match s.to_str() {
+                Some(s) => s.to_string(),
+                None => String::new(),
+            },
+            None => String::new(),
+        };
+
+        self.index.create_image(&Image {
+            image_id: 0,
+            node_id: node.node_id,
+            stream_index: None,
+            description,
+            width: i64::from(dimensions.0),
+            height: i64::from(dimensions.1),
+        })?;
+
+        Ok(Some(ScanStat {
+            images: 1,
+            ..Default::default()
+        }))
+    }
+
+    fn try_process_audio_file(&mut self, node: &Node, fs_path: &Path) -> Result<Option<ScanStat>> {
+        debug!("try audio file '{}'", fs_path.to_string_lossy());
+
+        let (mut tracks, mut images) = match media_info::media_info_from_path(&fs_path) {
             Some(m) => m,
             None => return Ok(None),
         };
@@ -544,11 +547,6 @@ impl Scan {
                     .artist_id,
                 );
             }
-
-            debug!(
-                "new track #{} '{}' by '{}' on '{}', {}s",
-                track.number, track.title, track.artist_name, track.album_name, track.length
-            );
 
             self.index.create_track(track)?;
 

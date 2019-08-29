@@ -4,6 +4,8 @@ use rusqlite::{Connection, Result, NO_PARAMS};
 use crate::schema;
 
 pub fn ensure_schema(conn: &mut Connection, schema: &str) -> Result<bool> {
+    trace!("trying to get schema version");
+
     conn.execute_batch(schema::META_SCHEMA)?;
 
     let schema_version: Option<u32> = conn
@@ -23,7 +25,11 @@ pub fn ensure_schema(conn: &mut Connection, schema: &str) -> Result<bool> {
             );
             return Ok(false);
         }
+
+        debug!("schema version up-to-date, doing nothing");
     } else {
+        debug!("schema meta not present, creating schema");
+
         let tran = conn.transaction()?;
 
         tran.execute(

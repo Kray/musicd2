@@ -385,6 +385,10 @@ static int internal_next(
 ) {
     int result;
 
+    if (self->finished) {
+        return STREAM_EOF;
+    }
+
     if (!self->started) {
         result = avformat_write_header(self->out_ctx, NULL);
         if (result < 0) {

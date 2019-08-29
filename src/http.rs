@@ -47,13 +47,13 @@ pub fn parse_request_headers(buf: &[u8]) -> std::io::Result<Option<HttpRequest>>
     }
 
     let full_path = request_parts[1].to_string();
+
     let mut path_parts = full_path.splitn(2, '?');
-
-    let path = path_parts.next().unwrap();
-
+    let path = path_parts.next().unwrap().to_string();
     let query = HttpQuery::from(path_parts.next().unwrap_or(""));
 
     Ok(Some(HttpRequest {
+        full_path,
         path: path.to_string(),
         query,
     }))
@@ -61,11 +61,16 @@ pub fn parse_request_headers(buf: &[u8]) -> std::io::Result<Option<HttpRequest>>
 
 #[derive(Debug)]
 pub struct HttpRequest {
+    full_path: String,
     path: String,
     query: HttpQuery,
 }
 
 impl HttpRequest {
+    pub fn full_path(&self) -> &str {
+        &self.full_path
+    }
+
     pub fn path(&self) -> &str {
         &self.path
     }

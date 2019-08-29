@@ -94,6 +94,8 @@ pub struct Index {
 
 impl IndexSource {
     pub fn create(db_path: PathBuf, roots: Arc<Vec<config::Root>>) -> Result<Option<IndexSource>> {
+        debug!("create source '{}'", db_path.to_string_lossy());
+
         let source = IndexSource { db_path, roots };
 
         let mut index = source.get()?;
@@ -109,7 +111,7 @@ impl IndexSource {
             Ok(c) => c,
             Err(e) => {
                 error!(
-                    "failed to open sqlite database '{}': {}",
+                    "can't open sqlite database '{}': {}",
                     self.db_path.to_string_lossy(),
                     e.description()
                 );
@@ -184,6 +186,8 @@ impl Index {
     }
 
     pub fn node(&self, node_id: i64) -> Result<Option<Node>> {
+        trace!("get node node_id={}", node_id);
+
         let mut st = self.conn.prepare(
             "SELECT node_id, node_type, parent_id, master_id, name, path, modified
             FROM Node
@@ -200,6 +204,12 @@ impl Index {
     }
 
     pub fn node_by_name(&self, parent_id: Option<i64>, name: &Path) -> Result<Option<Node>> {
+        trace!(
+            "get node parent_id={:?} name='{}'",
+            parent_id,
+            name.to_string_lossy()
+        );
+
         let mut st = self.conn.prepare(match parent_id {
             Some(_) => "
                 SELECT node_id, node_type, parent_id, master_id, name, path, modified
@@ -226,6 +236,8 @@ impl Index {
     }
 
     pub fn node_by_path(&self, path: &Path) -> Result<Option<Node>> {
+        trace!("get node path='{}'", path.to_string_lossy());
+
         let mut st = self.conn.prepare(
             "SELECT node_id, node_type, parent_id, master_id, name, path, modified
             FROM Node
@@ -258,16 +270,24 @@ impl Index {
             node.modified,
         ])?;
 
-        Ok(self.node(self.conn.last_insert_rowid())?.unwrap())
+        let result = self.node(self.conn.last_insert_rowid())?.unwrap();
+
+        debug!("create {:?}", result);
+
+        Ok(result)
     }
 
     pub fn delete_node(&self, node_id: i64) -> Result<()> {
+        trace!("delete node node_id={}", node_id);
+
         self.conn
             .execute("DELETE FROM Node WHERE node_id = ?", &[node_id])?;
         Ok(())
     }
 
     pub fn set_node_modified(&self, node_id: i64, modified: i64) -> Result<()> {
+        trace!("set node node_id={} modified={}", node_id, modified);
+
         self.conn.execute(
             "UPDATE Node SET modified = ? WHERE node_id = ?",
             params![modified, node_id],
@@ -276,6 +296,8 @@ impl Index {
     }
 
     pub fn set_node_master(&self, node_id: i64, master_id: i64) -> Result<()> {
+        trace!("set node node_id={} master_id={}", node_id, master_id);
+
         self.conn.execute(
             "UPDATE Node SET master_id = ? WHERE node_id = ?",
             params![master_id, node_id],
@@ -284,6 +306,8 @@ impl Index {
     }
 
     pub fn clear_node(&self, node_id: i64) -> Result<()> {
+        trace!("clear node node_id={}", node_id);
+
         self.conn
             .execute("DELETE FROM Track WHERE node_id = ?", &[node_id])?;
 
@@ -313,6 +337,8 @@ impl Index {
     }
 
     pub fn track(&self, track_id: i64) -> Result<Option<Track>> {
+        trace!("get track track_id={}", track_id);
+
         let mut st = self.conn
             .prepare(
                 "SELECT track_id, node_id, stream_index, track_index, start, number, title, artist_id, artist_name, album_id, album_name, album_artist_id, album_artist_name, length
@@ -352,7 +378,11 @@ impl Index {
             track.length,
         ])?;
 
-        Ok(self.track(self.conn.last_insert_rowid())?.unwrap())
+        let result = self.track(self.conn.last_insert_rowid())?.unwrap();
+
+        debug!("create {:?}", result);
+
+        Ok(result)
     }
 
     fn _get_image(row: &Row) -> Result<Image> {
@@ -367,6 +397,8 @@ impl Index {
     }
 
     pub fn image(&self, image_id: i64) -> Result<Option<Image>> {
+        trace!("get image image_id={}", image_id);
+
         let mut st = self.conn.prepare(
             "SELECT image_id, node_id, stream_index, description, width, height
             FROM Image
@@ -396,7 +428,11 @@ impl Index {
             image.height
         ])?;
 
-        Ok(self.image(self.conn.last_insert_rowid())?.unwrap())
+        let result = self.image(self.conn.last_insert_rowid())?.unwrap();
+
+        debug!("create {:?}", result);
+
+        Ok(result)
     }
 
     fn _get_artist(row: &Row) -> Result<Artist> {
@@ -407,6 +443,8 @@ impl Index {
     }
 
     pub fn artist(&self, artist_id: i64) -> Result<Option<Artist>> {
+        trace!("get artist artist_id={}", artist_id);
+
         let mut st = self.conn.prepare(
             "SELECT artist_id, name
             FROM Artist
@@ -423,6 +461,8 @@ impl Index {
     }
 
     pub fn artist_by_name(&self, name: &str) -> Result<Option<Artist>> {
+        trace!("get artist name={}", name);
+
         let mut st = self.conn.prepare(
             "SELECT artist_id, name
             FROM Artist
@@ -446,7 +486,11 @@ impl Index {
 
         st.execute(params![name])?;
 
-        Ok(self.artist(self.conn.last_insert_rowid())?.unwrap())
+        let result = self.artist(self.conn.last_insert_rowid())?.unwrap();
+
+        debug!("create {:?}", result);
+
+        Ok(result)
     }
 
     fn _get_album(row: &Row) -> Result<Album> {
@@ -460,6 +504,8 @@ impl Index {
     }
 
     pub fn album(&self, album_id: i64) -> Result<Option<Album>> {
+        trace!("get album album_id={}", album_id);
+
         let mut st = self.conn.prepare(
             "SELECT Album.album_id, Album.name, Album.artist_id, Album.artist_name, Album.image_id
                 FROM Album
@@ -480,10 +526,20 @@ impl Index {
 
         st.execute(params![name])?;
 
-        Ok(self.album(self.conn.last_insert_rowid())?.unwrap())
+        let result = self.album(self.conn.last_insert_rowid())?.unwrap();
+
+        debug!("create {:?}", result);
+
+        Ok(result)
     }
 
     pub fn find_album(&self, track_node_id: i64, album_name: &str) -> Result<Option<Album>> {
+        trace!(
+            "find album track_node_id={} album_name={}",
+            track_node_id,
+            album_name
+        );
+
         // Search the same directory
         let mut st = self.conn.prepare(
             "SELECT Album.album_id, Album.name, Album.artist_id, Album.artist_name, Album.image_id
@@ -518,6 +574,8 @@ impl Index {
     }
 
     pub fn process_node_updates(&self, node_id: i64) -> Result<()> {
+        trace!("process node updates node_id={}", node_id);
+
         self.conn
             .execute(
                 "UPDATE Album
@@ -616,6 +674,8 @@ impl Index {
     }
 
     pub fn debug_truncate(&self) -> Result<()> {
+        trace!("debug truncate");
+
         self.conn.execute_batch(
             "DELETE FROM Track;
             DELETE FROM Image;

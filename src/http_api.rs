@@ -5,12 +5,13 @@ use std::os::unix::ffi::OsStrExt;
 use std::sync::Arc;
 
 use rusqlite::types::ToSql;
+use rusqlite::{Connection, Statement};
 use serde::Serialize;
 use serde_json::json;
 use threadpool::ThreadPool;
 
 use crate::audio_stream::AudioStream;
-use crate::http::{self, HttpError, HttpRequest, HttpResponse};
+use crate::http::{self, HttpError, HttpQuery, HttpRequest, HttpResponse};
 use crate::index::NodeType;
 use crate::media_image;
 use crate::server::{Client, Receive, ServerIncoming};
@@ -121,16 +122,17 @@ pub fn run_api(
         let stream_thread = stream_thread.clone();
 
         threadpool.execute(move || {
-            debug!("{}", api_request.request.path());
+            debug!("request {}", api_request.request.full_path());
 
             let result = match api_request.request.path() {
                 "/api/musicd" => api_musicd(&api_request),
-                "/api/open" => api_open(&mut api_request, &stream_thread),
-                "/api/image" => api_image(&api_request),
+                "/api/audio_stream" => api_audio_stream(&mut api_request, &stream_thread),
+                "/api/image_file" => api_image_file(&api_request),
                 "/api/nodes" => api_nodes(&api_request),
                 "/api/tracks" => api_tracks(&api_request),
                 "/api/artists" => api_artists(&api_request),
                 "/api/albums" => api_albums(&api_request),
+                "/api/images" => api_images(&api_request),
                 _ => {
                     let mut response = HttpResponse::new();
                     response.status("404 Not Found").text_body("404 Not Found");
@@ -180,7 +182,7 @@ fn api_musicd(r: &ApiRequest) -> Result<HttpResponse> {
     r.json("{}")
 }
 
-fn api_open(r: &mut ApiRequest, stream_thread: &StreamThread) -> Result<HttpResponse> {
+fn api_audio_stream(r: &mut ApiRequest, stream_thread: &StreamThread) -> Result<HttpResponse> {
     let track_id = match r.request.query().get_i64("track_id") {
         Some(id) => id,
         None => {
@@ -229,7 +231,7 @@ fn api_open(r: &mut ApiRequest, stream_thread: &StreamThread) -> Result<HttpResp
     Ok(HttpResponse::new())
 }
 
-fn api_image(r: &ApiRequest) -> Result<HttpResponse> {
+fn api_image_file(r: &ApiRequest) -> Result<HttpResponse> {
     let image_id = match r.request.query().get_i64("image_id") {
         Some(id) => id,
         None => {
@@ -298,6 +300,115 @@ fn api_image(r: &ApiRequest) -> Result<HttpResponse> {
     Ok(response)
 }
 
+struct QueryOptions {
+    clauses: Vec<String>,
+    values: Vec<Box<dyn ToSql>>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+}
+
+impl QueryOptions {
+    pub fn new() -> QueryOptions {
+        QueryOptions {
+            clauses: Vec::new(),
+            values: Vec::new(),
+            limit: None,
+            offset: None,
+        }
+    }
+
+    pub fn filter(&mut self, clause: &str) {
+        self.clauses.push(clause.to_string());
+    }
+
+    pub fn filter_value<T>(&mut self, clause: &str, value: T)
+    where
+        T: ToSql,
+        T: 'static,
+    {
+        self.clauses.push(clause.to_string());
+        self.values.push(Box::new(value));
+    }
+
+    pub fn filter_values(&mut self, clause: &str, value: Vec<Box<dyn ToSql>>) {
+        self.clauses.push(clause.to_string());
+
+        for v in value {
+            self.values.push(Box::new(v));
+        }
+    }
+
+    pub fn bind_filter_i64(&mut self, query: &HttpQuery, key: &str, clause: &str) {
+        if let Some(value) = query.get_i64(key) {
+            self.filter_value(clause, value);
+        }
+    }
+
+    pub fn bind_filter_str(&mut self, query: &HttpQuery, key: &str, clause: &str) {
+        if let Some(value) = query.get_str(key) {
+            self.filter_value(clause, value.to_string());
+        }
+    }
+
+    pub fn limit(&mut self, limit: i64) {
+        self.limit = Some(limit);
+    }
+
+    pub fn offset(&mut self, offset: i64) {
+        self.offset = Some(offset);
+    }
+
+    pub fn bind_range(&mut self, query: &HttpQuery) {
+        if let Some(limit) = query.get_i64("limit") {
+            self.limit(limit)
+        }
+
+        if let Some(offset) = query.get_i64("offset") {
+            self.offset(offset)
+        }
+    }
+
+    pub fn get_total(&self, conn: &Connection, select_from: &str) -> Result<i64> {
+        let mut sql = select_from.to_string();
+
+        if !self.clauses.is_empty() {
+            sql += " WHERE ";
+            sql += &self.clauses.join(" AND ");
+        }
+
+        let mut st = conn.prepare(&sql)?;
+
+        Ok(st.query_row(&self.values, |row| row.get(0))?)
+    }
+
+    pub fn into_items_query<'a>(
+        mut self,
+        conn: &'a Connection,
+        select_from: &str,
+    ) -> Result<(Statement<'a>, Vec<Box<dyn ToSql>>)> {
+        let mut sql = select_from.to_string();
+
+        if !self.clauses.is_empty() {
+            sql += " WHERE ";
+            sql += &self.clauses.join(" AND ");
+        }
+
+        if let Some(limit) = self.limit {
+            sql += " LIMIT ?";
+            self.values.push(Box::new(limit));
+        }
+
+        if let Some(offset) = self.offset {
+            sql += " OFFSET ?";
+            self.values.push(Box::new(offset));
+        }
+
+        let st = conn.prepare(&sql)?;
+
+        Ok((st, self.values))
+    }
+}
+
 #[derive(Serialize)]
 struct NodeItem {
     node_id: i64,
@@ -313,89 +424,62 @@ struct NodeItem {
 
 fn api_nodes(r: &ApiRequest) -> Result<HttpResponse> {
     let query = r.request.query();
+    let mut opts = QueryOptions::new();
+
+    if let Some(parent_id) = query.get_str("parent_id") {
+        if let Ok(parent_id) = parent_id.parse::<i64>() {
+            opts.filter_value("Node.parent_id = ?", parent_id);
+        } else if parent_id == "null" {
+            opts.filter("Node.parent_id IS NULL");
+        }
+    }
+
+    opts.bind_range(&query);
 
     let index = r.musicd.index();
     let conn = index.connection();
 
-    let mut clauses: Vec<&str> = Vec::new();
-    let mut values: Vec<Box<dyn ToSql>> = Vec::new();
+    let total = opts.get_total(&conn, "SELECT COUNT(Node.node_id) FROM Node")?;
 
-    if let Some(parent_id) = query.get_str("parent_id") {
-        if let Ok(parent_id) = parent_id.parse::<i64>() {
-            clauses.push("Node.parent_id = ?");
-            values.push(Box::new(parent_id));
-        } else if parent_id == "null" {
-            clauses.push("Node.parent_id IS NULL");
-        }
-    }
+    let (mut st, values) = opts.into_items_query(
+        &conn,
+        "SELECT
+            Node.node_id,
+            Node.parent_id,
+            Node.node_type,
+            Node.name,
+            Node.path,
 
-    let mut sql = "SELECT COUNT(Node.node_id) FROM Node".to_string();
+            (
+                SELECT COUNT(track_id)
+                FROM Track
+                INNER JOIN Node track_node ON track_node.node_id = Track.node_id
+                WHERE track_node.parent_id = Node.node_id
+            ) AS track_count,
+            (
+                SELECT COUNT(image_id)
+                FROM Image
+                INNER JOIN Node image_node ON image_node.node_id = Image.node_id
+                WHERE image_node.parent_id = Node.node_id
+            ) AS image_count,
 
-    if !clauses.is_empty() {
-        sql += " WHERE ";
-        sql += &clauses.join(" AND ");
-    }
+            (
+                SELECT COUNT(track_id)
+                FROM Node AS child_node
+                INNER JOIN Track ON Track.node_id = child_node.node_id
+                WHERE child_node.path LIKE Node.path || '/%'
+            ) AS all_track_count,
+            (
+                SELECT COUNT(image_id)
+                FROM Node AS child_node
+                INNER JOIN Image ON Image.node_id = child_node.node_id
+                WHERE child_node.path LIKE Node.path || '/%'
+            ) AS all_image_count
 
-    let mut st = conn.prepare(&sql)?;
-
-    let total_results: i64 = st.query_row(&values, |row| row.get(0))?;
-
-    let mut sql = "
-            SELECT
-                Node.node_id,
-                Node.parent_id,
-                Node.node_type,
-                Node.name,
-                Node.path,
-
-                (
-                    SELECT COUNT(track_id)
-                    FROM Track
-                    INNER JOIN Node track_node ON track_node.node_id = Track.node_id
-                    WHERE track_node.parent_id = Node.node_id
-                ) AS track_count,
-                (
-                    SELECT COUNT(image_id)
-                    FROM Image
-                    INNER JOIN Node image_node ON image_node.node_id = Image.node_id
-                    WHERE image_node.parent_id = Node.node_id
-                ) AS image_count,
-
-                (
-                    SELECT COUNT(track_id)
-                    FROM Node AS child_node
-                    INNER JOIN Track ON Track.node_id = child_node.node_id
-                    WHERE child_node.path LIKE Node.path || '/%'
-                ) AS all_track_count,
-                (
-                    SELECT COUNT(image_id)
-                    FROM Node AS child_node
-                    INNER JOIN Image ON Image.node_id = child_node.node_id
-                    WHERE child_node.path LIKE Node.path || '/%'
-                ) AS all_image_count
-
-            FROM Node"
-        .to_string();
-
-    if !clauses.is_empty() {
-        sql += " WHERE ";
-        sql += &clauses.join(" AND ");
-    }
-
-    if let Some(limit) = query.get_i64("limit") {
-        sql += " LIMIT ?";
-        values.push(Box::new(limit));
-    }
-
-    if let Some(offset) = query.get_i64("offset") {
-        sql += " OFFSET ?";
-        values.push(Box::new(offset));
-    }
-
-    let mut st = conn.prepare(&sql)?;
+        FROM Node",
+    )?;
 
     let mut rows = st.query(&values)?;
-
     let mut items: Vec<NodeItem> = Vec::new();
 
     while let Some(row) = rows.next().unwrap() {
@@ -417,7 +501,7 @@ fn api_nodes(r: &ApiRequest) -> Result<HttpResponse> {
 
     r.json(
         &json!({
-            "total": total_results,
+            "total": total,
             "items": items
         })
         .to_string(),
@@ -439,101 +523,58 @@ struct TrackItem {
 
 fn api_tracks(r: &ApiRequest) -> Result<HttpResponse> {
     let query = r.request.query();
+    let mut opts = QueryOptions::new();
+
+    opts.bind_filter_i64(&query, "track_id", "Track.track_id = ?");
+    opts.bind_filter_i64(&query, "node_id", "Track.node_id = ?");
+    opts.bind_filter_i64(&query, "number", "Track.number = ?");
+    opts.bind_filter_str(&query, "title", "Track.title LIKE ? COLLATE NOCASE");
+    opts.bind_filter_i64(&query, "artist_id", "Track.artist_id = ?");
+    opts.bind_filter_str(
+        &query,
+        "artist_name",
+        "Track.artist_name LIKE ? COLLATE NOCASE",
+    );
+    opts.bind_filter_i64(&query, "album_id", "Track.album_id = ?");
+    opts.bind_filter_str(
+        &query,
+        "album_name",
+        "Track.album_name LIKE ? COLLATE NOCASE",
+    );
+
+    if let Some(search) = query.get_str("search") {
+        let mut values: Vec<Box<dyn ToSql>> = Vec::new();
+        values.push(Box::new(format!("%{}%", search)));
+        values.push(Box::new(format!("%{}%", search)));
+        values.push(Box::new(format!("%{}%", search)));
+
+        opts.filter_values(
+            "(Track.title LIKE ? OR Track.artist_name LIKE ? OR Track.album_name LIKE ?)",
+            values,
+        );
+    }
+
+    opts.bind_range(&query);
 
     let index = r.musicd.index();
     let conn = index.connection();
 
-    let mut clauses: Vec<&str> = Vec::new();
-    let mut values: Vec<Box<dyn ToSql>> = Vec::new();
+    let total = opts.get_total(&conn, "SELECT COUNT(Track.track_id) FROM Track")?;
 
-    if let Some(track_id) = query.get_i64("track_id") {
-        clauses.push("Track.track_id = ?");
-        values.push(Box::new(track_id));
-    }
-
-    if let Some(node_id) = query.get_i64("node_id") {
-        clauses.push("Track.node_id = ?");
-        values.push(Box::new(node_id));
-    }
-
-    if let Some(number) = query.get_i64("number") {
-        clauses.push("Track.number = ?");
-        values.push(Box::new(number));
-    }
-
-    if let Some(title) = query.get_str("title") {
-        clauses.push("Track.title LIKE ? COLLATE NOCASE");
-        values.push(Box::new(format!("%{}%", title)));
-    }
-
-    if let Some(artist_id) = query.get_i64("artist_id") {
-        clauses.push("Track.artist_id = ?");
-        values.push(Box::new(artist_id));
-    }
-
-    if let Some(artist_name) = query.get_str("artist_name") {
-        clauses.push("Track.artist_name LIKE ? COLLATE NOCASE");
-        values.push(Box::new(format!("%{}%", artist_name)));
-    }
-
-    if let Some(album_id) = query.get_i64("album_id") {
-        clauses.push("Track.album_id = ?");
-        values.push(Box::new(album_id));
-    }
-
-    if let Some(album_name) = query.get_str("album_name") {
-        clauses.push("Track.album_name LIKE ? COLLATE NOCASE");
-        values.push(Box::new(format!("%{}%", album_name)));
-    }
-
-    if let Some(search) = query.get_str("search") {
-        clauses.push("(Track.title LIKE ? OR Track.artist_name LIKE ? OR Track.album_name LIKE ?)");
-        values.push(Box::new(format!("%{}%", search)));
-        values.push(Box::new(format!("%{}%", search)));
-        values.push(Box::new(format!("%{}%", search)));
-    }
-
-    let mut sql = "SELECT COUNT(Track.track_id) FROM Track".to_string();
-
-    if !clauses.is_empty() {
-        sql += " WHERE ";
-        sql += &clauses.join(" AND ");
-    }
-
-    let mut st = conn.prepare(&sql)?;
-
-    let total_results: i64 = st.query_row(&values, |row| row.get(0))?;
-
-    let mut sql = "
-            SELECT
-                Track.track_id,
-                Track.node_id,
-                Track.number,
-                Track.title,
-                Track.artist_id,
-                Track.artist_name,
-                Track.album_id,
-                Track.album_name,
-                Track.length
-            FROM Track"
-        .to_string();
-
-    if !clauses.is_empty() {
-        sql += " WHERE ";
-        sql += &clauses.join(" AND ");
-    }
-
-    if let Some(limit) = query.get_i64("limit") {
-        sql += " LIMIT ?";
-        values.push(Box::new(limit));
-    }
-
-    if let Some(offset) = query.get_i64("offset") {
-        sql += " OFFSET ?";
-        values.push(Box::new(offset));
-    }
-
-    let mut st = conn.prepare(&sql)?;
+    let (mut st, values) = opts.into_items_query(
+        &conn,
+        "SELECT
+            Track.track_id,
+            Track.node_id,
+            Track.number,
+            Track.title,
+            Track.artist_id,
+            Track.artist_name,
+            Track.album_id,
+            Track.album_name,
+            Track.length
+        FROM Track",
+    )?;
 
     let mut rows = st.query(&values)?;
 
@@ -555,7 +596,7 @@ fn api_tracks(r: &ApiRequest) -> Result<HttpResponse> {
 
     r.json(
         &json!({
-            "total": total_results,
+            "total": total,
             "items": items
         })
         .to_string(),
@@ -571,58 +612,25 @@ struct ArtistItem {
 
 fn api_artists(r: &ApiRequest) -> Result<HttpResponse> {
     let query = r.request.query();
+    let mut opts = QueryOptions::new();
+
+    opts.bind_filter_i64(&query, "artist_id", "Artist.artist_id = ?");
+    opts.bind_filter_str(&query, "name", "Artist.name LIKE ? COLLATE NOCASE");
+    opts.bind_filter_str(&query, "search", "Artist.name LIKE ? COLLATE NOCASE");
+
+    opts.bind_range(&query);
 
     let index = r.musicd.index();
     let conn = index.connection();
 
-    let mut clauses: Vec<&str> = Vec::new();
-    let mut values: Vec<Box<dyn ToSql>> = Vec::new();
+    let total = opts.get_total(&conn, "SELECT COUNT(Artist.track_id) FROM Artist")?;
 
-    if let Some(artist_id) = query.get_i64("artist_id") {
-        clauses.push("Artist.artist_id = ?");
-        values.push(Box::new(artist_id));
-    }
-
-    if let Some(name) = query.get_str("name") {
-        clauses.push("Artist.name LIKE ? COLLATE NOCASE");
-        values.push(Box::new(format!("%{}%", name)));
-    }
-
-    let mut sql = "SELECT COUNT(Artist.artist_id) FROM Artist".to_string();
-
-    if !clauses.is_empty() {
-        sql += " WHERE ";
-        sql += &clauses.join(" AND ");
-    }
-
-    let mut st = conn.prepare(&sql)?;
-
-    let total_results: i64 = st.query_row(&values, |row| row.get(0))?;
-
-    let mut sql = "
-            SELECT
-                Artist.artist_id,
-                Artist.name,
-                (SELECT count(Track.track_id) FROM Track WHERE Track.artist_id = Artist.artist_id) AS track_count
-            FROM Artist"
-        .to_string();
-
-    if !clauses.is_empty() {
-        sql += " WHERE ";
-        sql += &clauses.join(" AND ");
-    }
-
-    if let Some(limit) = query.get_i64("limit") {
-        sql += " LIMIT ?";
-        values.push(Box::new(limit));
-    }
-
-    if let Some(offset) = query.get_i64("offset") {
-        sql += " OFFSET ?";
-        values.push(Box::new(offset));
-    }
-
-    let mut st = conn.prepare(&sql)?;
+    let (mut st, values) = opts.into_items_query(&conn,
+        "SELECT
+            Artist.artist_id,
+            Artist.name,
+            (SELECT count(Track.track_id) FROM Track WHERE Track.artist_id = Artist.artist_id) AS track_count
+        FROM Artist")?;
 
     let mut rows = st.query(&values)?;
 
@@ -638,7 +646,7 @@ fn api_artists(r: &ApiRequest) -> Result<HttpResponse> {
 
     r.json(
         &json!({
-            "total": total_results,
+            "total": total,
             "items": items
         })
         .to_string(),
@@ -657,76 +665,34 @@ struct AlbumItem {
 
 fn api_albums(r: &ApiRequest) -> Result<HttpResponse> {
     let query = r.request.query();
+    let mut opts = QueryOptions::new();
+
+    opts.bind_filter_i64(&query, "album_id", "Album.album_id = ?");
+    opts.bind_filter_str(&query, "name", "Album.name LIKE ? COLLATE NOCASE");
+    opts.bind_filter_i64(&query, "artist_id", "Album.artist_id = ?");
+    opts.bind_filter_str(
+        &query,
+        "artist_name",
+        "Album.artist_name LIKE ? COLLATE NOCASE",
+    );
+    opts.bind_filter_str(&query, "search", "Album.name LIKE ? COLLATE NOCASE");
+
+    opts.bind_range(&query);
 
     let index = r.musicd.index();
     let conn = index.connection();
 
-    let mut clauses: Vec<&str> = Vec::new();
-    let mut values: Vec<Box<dyn ToSql>> = Vec::new();
+    let total = opts.get_total(&conn, "SELECT COUNT(Album.album_id) FROM Album")?;
 
-    if let Some(album_id) = query.get_i64("album_id") {
-        clauses.push("Album.album_id = ?");
-        values.push(Box::new(album_id));
-    }
-
-    if let Some(name) = query.get_str("name") {
-        clauses.push("Album.name LIKE ? COLLATE NOCASE");
-        values.push(Box::new(format!("%{}%", name)));
-    }
-
-    if let Some(node_id) = query.get_i64("artist_id") {
-        clauses.push("Album.artist_id = ?");
-        values.push(Box::new(node_id));
-    }
-
-    if let Some(artist_name) = query.get_str("artist_name") {
-        clauses.push("Album.artist_name LIKE ? COLLATE NOCASE");
-        values.push(Box::new(format!("%{}%", artist_name)));
-    }
-
-    if let Some(search) = query.get_str("search") {
-        clauses.push("Album.name LIKE ? COLLATE NOCASE");
-        values.push(Box::new(format!("%{}%", search)));
-    }
-
-    let mut sql = "SELECT COUNT(Album.album_id) FROM Album".to_string();
-
-    if !clauses.is_empty() {
-        sql += " WHERE ";
-        sql += &clauses.join(" AND ");
-    }
-
-    let mut st = conn.prepare(&sql)?;
-
-    let total_results: i64 = st.query_row(&values, |row| row.get(0))?;
-
-    let mut sql = "
-            SELECT
-                Album.album_id,
-                Album.name,
-                Album.artist_id,
-                Album.artist_name,
-                Album.image_id,
-                (SELECT count(Track.track_id) FROM Track WHERE Track.album_id = Album.album_id) AS track_count
-            FROM Album"
-        .to_string();
-
-    if !clauses.is_empty() {
-        sql += " WHERE ";
-        sql += &clauses.join(" AND ");
-    }
-
-    if let Some(limit) = query.get_i64("limit") {
-        sql += " LIMIT ?";
-        values.push(Box::new(limit));
-    }
-
-    if let Some(offset) = query.get_i64("offset") {
-        sql += " OFFSET ?";
-        values.push(Box::new(offset));
-    }
-
-    let mut st = conn.prepare(&sql)?;
+    let (mut st, values) = opts.into_items_query(&conn,
+        "SELECT
+            Album.album_id,
+            Album.name,
+            Album.artist_id,
+            Album.artist_name,
+            Album.image_id,
+            (SELECT count(Track.track_id) FROM Track WHERE Track.album_id = Album.album_id) AS track_count
+        FROM Album")?;
 
     let mut rows = st.query(&values)?;
 
@@ -745,7 +711,60 @@ fn api_albums(r: &ApiRequest) -> Result<HttpResponse> {
 
     r.json(
         &json!({
-            "total": total_results,
+            "total": total,
+            "items": items
+        })
+        .to_string(),
+    )
+}
+
+#[derive(Serialize)]
+struct ImageItem {
+    image_id: i64,
+    node_id: i64,
+    description: String,
+}
+
+fn api_images(r: &ApiRequest) -> Result<HttpResponse> {
+    let query = r.request.query();
+    let mut opts = QueryOptions::new();
+
+    opts.bind_filter_i64(&query, "image_id", "Image.image_id = ?");
+    opts.bind_filter_i64(&query, "node_id", "Image.node_id = ?");
+    opts.bind_filter_str(&query, "description", "Image.description = ?");
+    opts.bind_filter_i64(&query, "album_id", "(SELECT album_id FROM AlbumImage WHERE AlbumImage.album_id = ? AND AlbumImage.image_id = Image.image_id LIMIT 1) IS NOT NULL");
+
+    opts.bind_range(&query);
+
+    let index = r.musicd.index();
+    let conn = index.connection();
+
+    let total = opts.get_total(&conn, "SELECT COUNT(Image.image_id) FROM Image")?;
+
+    let (mut st, values) = opts.into_items_query(
+        &conn,
+        "SELECT
+            Image.image_id,
+            Image.node_id,
+            Image.description
+        FROM Image",
+    )?;
+
+    let mut rows = st.query(&values)?;
+
+    let mut items: Vec<ImageItem> = Vec::new();
+
+    while let Some(row) = rows.next()? {
+        items.push(ImageItem {
+            image_id: row.get(0)?,
+            node_id: row.get(1)?,
+            description: row.get(2)?,
+        });
+    }
+
+    r.json(
+        &json!({
+            "total": total,
             "items": items
         })
         .to_string(),

@@ -6,7 +6,7 @@ use mio::Token;
 
 use crate::audio_stream::AudioStream;
 use crate::http::HttpResponse;
-use crate::server::{Client, ServerStreaming};
+use crate::server::{Client, ServerStreaming, StreamingEvent};
 
 type Result<T> = std::io::Result<T>;
 
@@ -26,27 +26,55 @@ impl StreamThread {
 
         let result_inner = inner.clone();
 
-        std::thread::spawn(move || loop {
-            let token = server.streaming_next().unwrap();
+        std::thread::spawn(move || {
+            debug!("started");
 
-            let inner = &mut *inner.lock().unwrap();
-            let audio_stream = inner
-                .audio_streams
-                .get_mut(&token)
-                .expect("nonexistent audio stream reported as writable");
+            loop {
+                let event = server.streaming_next().unwrap();
 
-            let mut buf = BytesMut::new();
+                let token = match event {
+                    StreamingEvent::Ready(t) => t,
+                    StreamingEvent::Close(t) => {
+                        let _audio_stream = inner.lock().unwrap().audio_streams.remove(&t).unwrap();
+                        debug!("closing audio stream {:?}", t);
+                        continue;
+                    }
+                    StreamingEvent::Shutdown => {
+                        debug!("shutdown command received");
+                        break;
+                    }
+                };
 
-            let result = audio_stream.next(|data| {
-                buf.extend_from_slice(&data);
-                data.len()
-            });
+                let inner = &mut *inner.lock().unwrap();
+                let audio_stream = inner
+                    .audio_streams
+                    .get_mut(&token)
+                    .expect("nonexistent audio stream reported as writable");
 
-            server.streaming_feed(token, &buf);
+                let mut buf = BytesMut::new();
 
-            if !result {
-                server.streaming_drain(token);
+                let result = audio_stream.next(|data| {
+                    buf.extend_from_slice(&data);
+                    data.len()
+                });
+
+                trace!(
+                    "received {} bytes from audio stream {:?}, feeding",
+                    buf.len(),
+                    token
+                );
+
+                server.streaming_feed(token, &buf);
+
+                if !result {
+                    debug!("draining audio stream {:?}", token);
+
+                    server.streaming_drain(token);
+                    inner.audio_streams.remove(&token).unwrap();
+                }
             }
+
+            debug!("stopping")
         });
 
         Ok(StreamThread {
@@ -62,6 +90,8 @@ impl StreamThread {
 
         let token = client.add_stream(response.to_bytes())?;
         inner.audio_streams.insert(token, audio_stream);
+
+        debug!("added audio stream {:?}", token);
 
         Ok(())
     }

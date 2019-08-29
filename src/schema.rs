@@ -15,7 +15,7 @@ CREATE TABLE Cache (
 ";
 
 pub const INDEX_SCHEMA: &str = "
-CREATE TABLE Node (                                                                                                                                                                               
+CREATE TABLE Node (
     node_id INTEGER PRIMARY KEY AUTOINCREMENT,
     node_type INTEGER NOT NULL,
     parent_id INTEGER,

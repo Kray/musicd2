@@ -55,6 +55,7 @@ struct AudioStream {
     AVFilterContext *abuffer_ctx, *aformat_ctx, *abuffersink_ctx;
     int64_t end_pts;
     int started;
+    int finished;
     void *write_opaque;
     int (*write_callback)(void *opaque, uint8_t *buf, int len);
 };

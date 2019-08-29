@@ -29,6 +29,8 @@ pub struct Store {
 
 impl StoreSource {
     pub fn create(db_path: PathBuf, index: Index) -> Result<Option<StoreSource>> {
+        debug!("create source {}", db_path.to_string_lossy());
+
         let source = StoreSource { db_path };
 
         let mut store = source.get(index)?;
@@ -44,7 +46,7 @@ impl StoreSource {
             Ok(c) => c,
             Err(e) => {
                 error!(
-                    "failed to open sqlite database '{}': {}",
+                    "can't open sqlite database '{}': {}",
                     self.db_path.to_string_lossy(),
                     e.description()
                 );
@@ -63,6 +65,8 @@ impl StoreSource {
 
 impl Store {
     pub fn synchronize(&mut self) -> Result<()> {
+        debug!("synchronize");
+
         let store_conn = &self.conn;
         let index_conn = self.index.connection();
 
@@ -108,6 +112,8 @@ impl Store {
                 play_count: row.get(5)?,
                 last_play: row.get(6)?,
             };
+
+            trace!("add to index {:?}", store_track);
 
             st.execute(params![
                 store_track.title,

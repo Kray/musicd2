@@ -90,6 +90,9 @@ fn main() {
         .get_matches();
 
     logger::init();
+
+    info!("{}", MUSICD_VERSION);
+
     musicd_c::init();
 
     let mut roots: Vec<config::Root> = Vec::new();
@@ -133,8 +136,6 @@ fn main() {
         index_source,
         store_source,
     });
-
-    info!("musicd2 {}", MUSICD_VERSION);
 
     let index = musicd.index();
 

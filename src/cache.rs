@@ -18,6 +18,8 @@ pub struct Cache {
 
 impl CacheSource {
     pub fn create(db_path: PathBuf, max_size: usize) -> Result<Option<CacheSource>> {
+        debug!("create source '{}'", db_path.to_string_lossy());
+
         let source = CacheSource { db_path, max_size };
 
         let mut cache = source.get()?;
@@ -33,7 +35,7 @@ impl CacheSource {
             Ok(c) => c,
             Err(e) => {
                 error!(
-                    "failed to open sqlite database '{}': {}",
+                    "can't open sqlite database '{}': {}",
                     self.db_path.to_string_lossy(),
                     e.description()
                 );
@@ -50,6 +52,8 @@ impl CacheSource {
 
 impl Cache {
     pub fn get_blob(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        trace!("get blob '{}'", key);
+
         let result: Option<Vec<u8>> = self
             .conn
             .query_row("SELECT value FROM cache WHERE key = ?", &[key], |row| {
@@ -58,6 +62,7 @@ impl Cache {
             .optional()?;
 
         if result.is_some() {
+            trace!("update blob '{}' last_access", key);
             self.conn.execute(
                 "UPDATE cache SET last_access = strftime('%s','now') WHERE key = ?",
                 &[key],
@@ -68,6 +73,8 @@ impl Cache {
     }
 
     pub fn set_blob(&self, key: &str, value: &[u8]) -> Result<()> {
+        trace!("set blob '{}'", key);
+
         let mut st = self.conn.prepare(
             "INSERT OR REPLACE
             INTO cache (key, value, size, last_access)
@@ -83,6 +90,12 @@ impl Cache {
             if size as usize <= self.max_size {
                 break;
             }
+
+            trace!(
+                "max_size reached ({} > {}), clearing 1 item",
+                size,
+                self.max_size
+            );
 
             self.conn.execute(
                 "
