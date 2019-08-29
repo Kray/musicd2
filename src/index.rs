@@ -7,7 +7,7 @@ use std::sync::Arc;
 use rusqlite::{params, Connection, Result, Row, NO_PARAMS};
 use serde::Serialize;
 
-use crate::config;
+use crate::Root;
 use crate::db_meta;
 use crate::schema;
 
@@ -84,16 +84,16 @@ pub struct Artist {
 
 pub struct IndexSource {
     db_path: PathBuf,
-    roots: Arc<Vec<config::Root>>,
+    roots: Arc<Vec<Root>>,
 }
 
 pub struct Index {
     conn: Connection,
-    roots: Arc<Vec<config::Root>>,
+    roots: Arc<Vec<Root>>,
 }
 
 impl IndexSource {
-    pub fn create(db_path: PathBuf, roots: Arc<Vec<config::Root>>) -> Result<Option<IndexSource>> {
+    pub fn create(db_path: PathBuf, roots: Arc<Vec<Root>>) -> Result<Option<IndexSource>> {
         info!("using '{}'", db_path.to_string_lossy());
 
         let source = IndexSource { db_path, roots };
@@ -132,7 +132,7 @@ impl IndexSource {
 }
 
 impl Index {
-    pub fn roots(&self) -> &Vec<config::Root> {
+    pub fn roots(&self) -> &Vec<Root> {
         &self.roots
     }
 
