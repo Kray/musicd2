@@ -623,7 +623,7 @@ fn api_artists(r: &ApiRequest) -> Result<HttpResponse> {
     let index = r.musicd.index();
     let conn = index.connection();
 
-    let total = opts.get_total(&conn, "SELECT COUNT(Artist.track_id) FROM Artist")?;
+    let total = opts.get_total(&conn, "SELECT COUNT(Artist.artist_id) FROM Artist")?;
 
     let (mut st, values) = opts.into_items_query(&conn,
         "SELECT
