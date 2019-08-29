@@ -4,7 +4,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use rusqlite::{params, Connection, Result, Row};
+use rusqlite::{params, Connection, Result, Row, NO_PARAMS};
 use serde::Serialize;
 
 use crate::config;
@@ -253,6 +253,34 @@ impl Index {
         } else {
             Ok(None)
         }
+    }
+
+    pub fn nodes_by_parent(&self, parent_id: Option<i64>) -> Result<Vec<Node>> {
+        trace!("list nodes by parent_id={:?}", parent_id);
+
+        let mut st = self.conn.prepare(match parent_id {
+            Some(_) => "
+                SELECT node_id, node_type, parent_id, master_id, name, path, modified
+                FROM Node
+                WHERE parent_id = ?",
+            None => "
+                SELECT node_id, node_type, parent_id, master_id, name, path, modified
+                FROM Node
+                WHERE parent_id IS NULL",
+        })?;
+
+        let mut rows = match parent_id {
+            Some(id) => st.query(&[id])?,
+            None => st.query(NO_PARAMS)?,
+        };
+
+        let mut result = Vec::new();
+
+        while let Some(row) = rows.next()? {
+            result.push(Self::_get_node(row)?);
+        }
+
+        Ok(result)
     }
 
     pub fn create_node(&self, node: &Node) -> Result<Node> {

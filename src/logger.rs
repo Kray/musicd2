@@ -45,7 +45,7 @@ pub fn init(log_level: &str) {
         "trace" => Level::Trace,
         _ => unreachable!(),
     };
-    
+
     log::set_logger(&LOGGER).unwrap();
     log::set_max_level(level.to_level_filter())
 }

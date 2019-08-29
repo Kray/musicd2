@@ -51,7 +51,13 @@ struct Scan {
     index: Index,
 }
 
-struct ScanNode {
+enum NodeArg<'a> {
+    Node(Node),
+    Name(&'a Path),
+}
+
+struct ScanNode<'a> {
+    parent: Option<&'a Node>,
     node: Node,
     fs_path: PathBuf,
     modified: i64,
@@ -126,7 +132,7 @@ impl Scan {
         for (name, path) in roots {
             debug!("root '{}' = '{}'", name, path.to_string_lossy());
 
-            match self.scan_node(None, Path::new(OsStr::from_bytes(name.as_bytes()))) {
+            match self.scan_node_unprepared(None, Path::new(OsStr::from_bytes(name.as_bytes()))) {
                 Ok(s) => {
                     if let Some(s) = s {
                         stat.add(&s);
@@ -143,24 +149,30 @@ impl Scan {
             }
         }
 
-        info!(
-            "done in {}s: {:?}",
-            start_instant.elapsed().as_secs(),
-            stat
-        );
+        info!("done in {}s: {:?}", start_instant.elapsed().as_secs(), stat);
 
         Ok(())
     }
 
-    fn scan_node(&mut self, parent: Option<&Node>, name: &Path) -> Result<Option<ScanStat>> {
+    fn scan_node_unprepared(
+        &mut self,
+        parent: Option<&Node>,
+        name: &Path,
+    ) -> Result<Option<ScanStat>> {
+        let scan_node = self.prepare_node(parent, NodeArg::Name(name))?;
+        self.scan_node(scan_node)
+    }
+
+    fn scan_node(&mut self, scan_node: ScanNode) -> Result<Option<ScanStat>> {
         let ScanNode {
+            parent,
             node,
             fs_path,
             modified,
-        } = self.prepare_node(parent, name)?;
+        } = scan_node;
 
-        if node.node_type == NodeType::Directory {
-            let result = self.process_directory_node(&node, &fs_path)?;
+        let result = if node.node_type == NodeType::Directory {
+            let result = self.process_directory_node(&node, &fs_path, node.modified != modified)?;
 
             if let Some(result) = &result {
                 if result.changed() {
@@ -168,14 +180,15 @@ impl Scan {
                 }
             }
 
-            self.index.set_node_modified(node.node_id, modified)?;
-
             Ok(result)
         } else if node.node_type == NodeType::File && node.modified != modified {
             let parent = match parent {
                 Some(n) => n,
                 None => {
-                    error!("root node '{}' isn't directory", name.to_string_lossy());
+                    error!(
+                        "root node '{}' isn't directory",
+                        node.name.to_string_lossy()
+                    );
                     return Err(Error::OtherError);
                 }
             };
@@ -189,23 +202,38 @@ impl Scan {
                 self.process_file_node(parent, &node, &fs_path)?
             };
 
-            self.index.set_node_modified(node.node_id, modified)?;
-
             Ok(result)
         } else {
             Ok(None)
+        };
+
+        if node.modified != modified {
+            self.index.set_node_modified(node.node_id, modified)?;
         }
+
+        result
     }
 
-    fn prepare_node(&mut self, parent: Option<&Node>, name: &Path) -> Result<ScanNode> {
+    fn prepare_node<'a>(
+        &mut self,
+        parent: Option<&'a Node>,
+        node_arg: NodeArg,
+    ) -> Result<ScanNode<'a>> {
         let parent_id = match parent {
             Some(node) => Some(node.node_id),
             None => None,
         };
 
-        let path = match parent {
-            Some(parent_node) => PathBuf::from(&parent_node.path).join(name),
-            None => PathBuf::from(name),
+        let (name, path, mut node) = match node_arg {
+            NodeArg::Node(node) => (node.name.clone(), node.path.clone(), Some(node)),
+            NodeArg::Name(name) => (
+                PathBuf::from(name),
+                match parent {
+                    Some(parent_node) => PathBuf::from(&parent_node.path).join(name),
+                    None => PathBuf::from(name),
+                },
+                None,
+            ),
         };
 
         let fs_path = match self.index.map_fs_path(&path) {
@@ -216,7 +244,9 @@ impl Scan {
             }
         };
 
-        let node = self.index.node_by_name(parent_id, name)?;
+        if node.is_none() {
+            node = self.index.node_by_name(parent_id, &name)?;
+        }
 
         let metadata = match fs::metadata(&fs_path) {
             Ok(m) => m,
@@ -259,6 +289,20 @@ impl Scan {
             NodeType::Other
         };
 
+        if let Some(n) = &node {
+            if n.node_type != node_type {
+                trace!(
+                    "node '{}' type has changed ({:?} => {:?}), recreating node",
+                    fs_path.to_string_lossy(),
+                    n.node_type,
+                    node_type
+                );
+                self.index.delete_node(n.node_id)?;
+
+                node = None;
+            }
+        }
+
         let node = match node {
             Some(n) => n,
             None => {
@@ -282,22 +326,50 @@ impl Scan {
         // trace!("prepare_node {} = {}", node.node_id, fs_path.to_string_lossy());
 
         Ok(ScanNode {
+            parent,
             node,
             fs_path,
             modified,
         })
     }
 
-    fn process_directory_node(&mut self, node: &Node, fs_path: &Path) -> Result<Option<ScanStat>> {
+    fn process_directory_node(
+        &mut self,
+        node: &Node,
+        fs_path: &Path,
+        modified: bool,
+    ) -> Result<Option<ScanStat>> {
         debug!("directory '{}'", fs_path.to_string_lossy());
 
         let mut stat = ScanStat {
             ..Default::default()
         };
 
-        for entry in fs::read_dir(fs_path)? {
-            if let Ok(Some(node_stat)) = self.scan_node(Some(&node), Path::new(&entry?.file_name()))
-            {
+        let mut fs_entries: Vec<_> = Vec::new();
+
+        if modified {
+            for entry in fs::read_dir(fs_path)? {
+                fs_entries.push(entry?.file_name());
+            }
+        } else {
+            trace!("directory was not modified, not reading file system entries");
+        }
+
+        let index_nodes = self.index.nodes_by_parent(Some(node.node_id))?;
+        for index_node in index_nodes {
+            if let Some(pos) = fs_entries.iter().position(|e| e == &index_node.name) {
+                fs_entries.remove(pos);
+            }
+
+            if let Ok(scan_node) = self.prepare_node(Some(node), NodeArg::Node(index_node)) {
+                if let Ok(Some(node_stat)) = self.scan_node(scan_node) {
+                    stat.add(&node_stat);
+                }
+            }
+        }
+
+        for entry in fs_entries {
+            if let Ok(Some(node_stat)) = self.scan_node_unprepared(Some(&node), Path::new(&entry)) {
                 stat.add(&node_stat);
             }
         }
@@ -367,7 +439,7 @@ impl Scan {
 
             let file_node = match self.prepare_node(
                 Some(parent),
-                Path::new(OsStr::from_bytes(&file.path.as_bytes())),
+                NodeArg::Name(Path::new(OsStr::from_bytes(&file.path.as_bytes()))),
             ) {
                 Ok(n) => n,
                 Err(_) => continue,

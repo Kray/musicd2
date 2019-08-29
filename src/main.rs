@@ -70,7 +70,7 @@ fn main() {
             Arg::with_name("cache-limit")
                 .long("cache-limit")
                 .help("Maximum cache size in bytes")
-                .default_value("104857600")
+                .default_value("104857600"),
         )
         .arg(
             Arg::with_name("directory")
@@ -83,9 +83,7 @@ fn main() {
                 .long("log-level")
                 .help("Log level")
                 .default_value("info")
-                .possible_values(&[
-                    "error", "warn", "info", "debug", "trace"
-                ]),
+                .possible_values(&["error", "warn", "info", "debug", "trace"]),
         )
         .arg(
             Arg::with_name("no-scan")
@@ -130,9 +128,12 @@ fn main() {
 
     std::fs::create_dir_all(directory).expect("can't create directory");
 
-    let cache_source = CacheSource::create(directory.join("cache.db"), clap::value_t_or_exit!(matches.value_of("cache-limit"), usize))
-        .unwrap()
-        .unwrap();
+    let cache_source = CacheSource::create(
+        directory.join("cache.db"),
+        clap::value_t_or_exit!(matches.value_of("cache-limit"), usize),
+    )
+    .unwrap()
+    .unwrap();
     let index_source = IndexSource::create(directory.join("index.db"), roots.clone())
         .unwrap()
         .unwrap();
@@ -155,7 +156,7 @@ fn main() {
     let index = musicd.index();
 
     if !matches.is_present("no-scan") {
-        index.debug_truncate().unwrap();
+        //index.debug_truncate().unwrap();
         scan::scan(index);
     }
 
@@ -163,7 +164,7 @@ fn main() {
     store.synchronize().unwrap();
 
     let (server_incoming, server_streaming) = Server::launch_new().unwrap();
-    
+
     let stream_thread = Arc::new(StreamThread::launch_new(server_streaming).unwrap());
 
     http_api::run_api(musicd.clone(), bind, server_incoming, stream_thread.clone());
