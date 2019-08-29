@@ -18,7 +18,7 @@ pub struct Cache {
 
 impl CacheSource {
     pub fn create(db_path: PathBuf, max_size: usize) -> Result<Option<CacheSource>> {
-        debug!("create source '{}'", db_path.to_string_lossy());
+        info!("using '{}', max_size={}", db_path.to_string_lossy(), max_size);
 
         let source = CacheSource { db_path, max_size };
 

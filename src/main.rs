@@ -68,10 +68,25 @@ fn main() {
                 .default_value("127.0.0.1:6801"),
         )
         .arg(
+            Arg::with_name("cache-limit")
+                .long("cache-limit")
+                .help("Maximum cache size in bytes")
+                .default_value(stringify!(100 * 1024 * 1024))
+        )
+        .arg(
             Arg::with_name("directory")
                 .long("directory")
                 .help("Database directory")
                 .default_value("~/.musicd2"),
+        )
+        .arg(
+            Arg::with_name("log-level")
+                .long("log-level")
+                .help("Log level")
+                .default_value("info")
+                .possible_values(&[
+                    "error", "warn", "info", "debug", "trace"
+                ]),
         )
         .arg(
             Arg::with_name("no-scan")
@@ -89,7 +104,7 @@ fn main() {
         )
         .get_matches();
 
-    logger::init();
+    logger::init(matches.value_of("log-level").unwrap());
 
     info!("{}", MUSICD_VERSION);
 
@@ -116,7 +131,7 @@ fn main() {
 
     std::fs::create_dir_all(directory).expect("can't create directory");
 
-    let cache_source = CacheSource::create(directory.join("cache.db"), 100 * 1024 * 1024)
+    let cache_source = CacheSource::create(directory.join("cache.db"), clap::value_t_or_exit!(matches.value_of("cache-limit"), usize))
         .unwrap()
         .unwrap();
     let index_source = IndexSource::create(directory.join("index.db"), roots.clone())

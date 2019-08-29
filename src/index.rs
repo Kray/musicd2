@@ -94,7 +94,7 @@ pub struct Index {
 
 impl IndexSource {
     pub fn create(db_path: PathBuf, roots: Arc<Vec<config::Root>>) -> Result<Option<IndexSource>> {
-        debug!("create source '{}'", db_path.to_string_lossy());
+        info!("using '{}'", db_path.to_string_lossy());
 
         let source = IndexSource { db_path, roots };
 

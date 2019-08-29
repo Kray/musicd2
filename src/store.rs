@@ -29,7 +29,7 @@ pub struct Store {
 
 impl StoreSource {
     pub fn create(db_path: PathBuf, index: Index) -> Result<Option<StoreSource>> {
-        debug!("create source {}", db_path.to_string_lossy());
+        info!("using '{}'", db_path.to_string_lossy());
 
         let source = StoreSource { db_path };
 
