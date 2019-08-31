@@ -60,7 +60,16 @@ struct AudioStream {
     int (*write_callback)(void *opaque, uint8_t *buf, int len);
 };
 
-void musicd_init();
+enum LogLevel {
+    LogLevelError = 1,
+    LogLevelWarn = 2,
+    LogLevelInfo = 3,
+    LogLevelDebug = 4,
+    LogLevelTrace = 5
+};
+
+void musicd_log_setup(void (*callback)(int level, const char *));
+
 void lav_error(const char *msg, int lav_result);
 
 struct MediaInfo *media_info_from_path(const char *path);

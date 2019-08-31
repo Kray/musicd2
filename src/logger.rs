@@ -1,5 +1,11 @@
+use std::cell::RefCell;
+use std::ffi::CStr;
+use std::os::raw::{c_char, c_int};
+
 use chrono::prelude::*;
 use log::{Level, Metadata, Record};
+
+use crate::musicd_c::{self, LogLevel};
 
 pub struct Logger;
 
@@ -34,6 +40,39 @@ impl log::Log for Logger {
     fn flush(&self) {}
 }
 
+thread_local!(static LOG_C_BUF: RefCell<String> = RefCell::new(String::new()));
+
+extern "C" fn log_c_callback(level: c_int, message: *const c_char) {
+    let log_level = if level == LogLevel::LogLevelError as i32 {
+        Level::Error
+    } else if level == LogLevel::LogLevelWarn as i32 {
+        Level::Warn
+    } else if level == LogLevel::LogLevelInfo as i32 {
+        Level::Info
+    } else if level == LogLevel::LogLevelDebug as i32 {
+        Level::Debug
+    } else if level == LogLevel::LogLevelTrace as i32 {
+        Level::Trace
+    } else {
+        return;
+    };
+
+    let c_str: &CStr = unsafe { CStr::from_ptr(message) };
+    let str_slice: &str = c_str.to_str().unwrap();
+
+    LOG_C_BUF.with(|buf| {
+        let buf = &mut *buf.borrow_mut();
+
+        *buf += str_slice;
+
+        if buf.ends_with('\n') {
+            buf.pop();
+            log!(target: "musicd2::c", log_level, "{}", buf);
+            buf.clear();
+        }
+    });
+}
+
 static LOGGER: Logger = Logger;
 
 pub fn init(log_level: &str) {
@@ -47,5 +86,9 @@ pub fn init(log_level: &str) {
     };
 
     log::set_logger(&LOGGER).unwrap();
-    log::set_max_level(level.to_level_filter())
+    log::set_max_level(level.to_level_filter());
+
+    unsafe {
+        musicd_c::musicd_log_setup(log_c_callback);
+    }
 }

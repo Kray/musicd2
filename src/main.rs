@@ -120,8 +120,6 @@ fn main() {
 
     info!("{}", MUSICD_VERSION);
 
-    musicd_c::init();
-
     let mut roots: Vec<Root> = Vec::new();
 
     if matches.is_present("root") {

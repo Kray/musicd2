@@ -39,8 +39,16 @@ pub struct AudioStreamOptions {
     pub target_codec: *const c_char,
 }
 
+pub enum LogLevel {
+    LogLevelError = 1,
+    LogLevelWarn = 2,
+    LogLevelInfo = 3,
+    LogLevelDebug = 4,
+    LogLevelTrace = 5,
+}
+
 extern "C" {
-    pub fn musicd_init();
+    pub fn musicd_log_setup(callback: extern "C" fn(level: c_int, message: *const c_char));
 
     pub fn media_info_from_path(path: *const c_char) -> *const MediaInfo;
     pub fn media_info_free(track: *const MediaInfo);
@@ -60,10 +68,4 @@ extern "C" {
         out_len: *mut usize,
     ) -> c_int;
     pub fn media_image_data_free(data: *mut u8);
-}
-
-pub fn init() {
-    unsafe {
-        musicd_init();
-    }
 }
