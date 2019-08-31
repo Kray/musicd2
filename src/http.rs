@@ -165,7 +165,9 @@ impl HttpQuery {
             let key = parts.next().unwrap();
             let value = Self::decode_url(parts.next().unwrap_or(""));
 
-            query.value.insert(key.to_string(), Self::decode_url(&value));
+            query
+                .value
+                .insert(key.to_string(), Self::decode_url(&value));
         }
 
         query
@@ -182,13 +184,13 @@ impl HttpQuery {
                     && bytes[i + 1].is_ascii_hexdigit()
                     && bytes[i + 2].is_ascii_hexdigit() =>
                 {
-                    result.push(u8::from_str_radix(&src[i+1..i+3], 16).unwrap());
+                    result.push(u8::from_str_radix(&src[i + 1..i + 3], 16).unwrap());
                     i += 3;
-                },
+                }
                 b'+' => {
                     result.push(b' ');
                     i += 1;
-                },
+                }
                 ch => {
                     result.push(ch);
                     i += 1;
