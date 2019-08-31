@@ -97,7 +97,7 @@ pub fn run_api(
     server: ServerIncoming,
     stream_thread: Arc<StreamThread>,
 ) {
-    let threadpool = ThreadPool::new(4);
+    let threadpool = ThreadPool::new(16);
     let server = Arc::new(server);
 
     info!("listening on {}", bind);
@@ -203,6 +203,11 @@ fn api_audio_stream(r: &mut ApiRequest, stream_thread: &StreamThread) -> Result<
         }
     };
 
+    let start = r.request.query().get_i64("start").unwrap_or(0) as f64;
+    if start < 0f64 {
+        return r.err(400, "Bad Request");
+    }
+
     let index = r.musicd.index();
 
     let track = match index.track(track_id)? {
@@ -215,13 +220,15 @@ fn api_audio_stream(r: &mut ApiRequest, stream_thread: &StreamThread) -> Result<
     let node = index.node(track.node_id)?.unwrap();
     let fs_path = index.map_fs_path(&node.path).unwrap();
 
+    let start = start + track.start.unwrap_or(0f64);
+
     let audio_stream = AudioStream::open(
         &fs_path,
         track.stream_index as i32,
         track.track_index.unwrap_or(0) as i32,
-        track.start.unwrap_or(0f64),
+        start,
         if track.start.is_some() {
-            track.length
+            track.length - start
         } else {
             0f64
         },
@@ -316,6 +323,7 @@ fn api_image_file(r: &ApiRequest) -> Result<HttpResponse> {
 struct QueryOptions {
     clauses: Vec<String>,
     values: Vec<Box<dyn ToSql>>,
+    order_string: Option<String>,
     limit: Option<i64>,
     offset: Option<i64>,
 }
@@ -325,6 +333,7 @@ impl QueryOptions {
         QueryOptions {
             clauses: Vec::new(),
             values: Vec::new(),
+            order_string: None,
             limit: None,
             offset: None,
         }
@@ -361,6 +370,10 @@ impl QueryOptions {
         if let Some(value) = query.get_str(key) {
             self.filter_value(clause, value.to_string());
         }
+    }
+
+    pub fn order_string(&mut self, order_string: &str) {
+        self.order_string = Some(order_string.to_string());
     }
 
     pub fn limit(&mut self, limit: i64) {
@@ -404,6 +417,11 @@ impl QueryOptions {
         if !self.clauses.is_empty() {
             sql += " WHERE ";
             sql += &self.clauses.join(" AND ");
+        }
+
+        if let Some(order) = self.order_string {
+            sql += " ORDER BY ";
+            sql += &order;
         }
 
         if let Some(limit) = self.limit {
@@ -567,6 +585,8 @@ fn api_tracks(r: &ApiRequest) -> Result<HttpResponse> {
         );
     }
 
+    opts.order_string("Track.album_name, Track.number, Track.title");
+
     opts.bind_range(&query);
 
     let index = r.musicd.index();
@@ -630,6 +650,8 @@ fn api_artists(r: &ApiRequest) -> Result<HttpResponse> {
     opts.bind_filter_i64(&query, "artist_id", "Artist.artist_id = ?");
     opts.bind_filter_str(&query, "name", "Artist.name LIKE ? COLLATE NOCASE");
     opts.bind_filter_str(&query, "search", "Artist.name LIKE ? COLLATE NOCASE");
+
+    opts.order_string("Artist.name");
 
     opts.bind_range(&query);
 
@@ -696,6 +718,8 @@ fn api_albums(r: &ApiRequest) -> Result<HttpResponse> {
 
         opts.filter_values("(Album.name LIKE ? OR Album.artist_name LIKE ?)", values);
     }
+
+    opts.order_string("Album.artist_name, Album.name");
 
     opts.bind_range(&query);
 
