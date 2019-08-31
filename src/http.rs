@@ -163,12 +163,40 @@ impl HttpQuery {
             let mut parts = field.splitn(2, '=');
 
             let key = parts.next().unwrap();
-            let value = parts.next().unwrap_or("");
+            let value = Self::decode_url(parts.next().unwrap_or(""));
 
-            query.value.insert(key.to_string(), value.to_string());
+            query.value.insert(key.to_string(), Self::decode_url(&value));
         }
 
         query
+    }
+
+    fn decode_url(src: &str) -> String {
+        let mut result: Vec<u8> = Vec::new();
+        let bytes = src.as_bytes();
+
+        let mut i = 0;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'%' if i <= bytes.len() - 3
+                    && bytes[i + 1].is_ascii_hexdigit()
+                    && bytes[i + 2].is_ascii_hexdigit() =>
+                {
+                    result.push(u8::from_str_radix(&src[i+1..i+3], 16).unwrap());
+                    i += 3;
+                },
+                b'+' => {
+                    result.push(b' ');
+                    i += 1;
+                },
+                ch => {
+                    result.push(ch);
+                    i += 1;
+                }
+            }
+        }
+
+        String::from_utf8_lossy(&result).into_owned()
     }
 
     pub fn get_str(&self, key: &str) -> Option<&str> {
