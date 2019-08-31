@@ -1,12 +1,12 @@
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use bytes::BytesMut;
-use mio::Token;
 
 use crate::audio_stream::AudioStream;
 use crate::http::HttpResponse;
-use crate::server::{Client, ServerStreaming, StreamingEvent};
+use crate::server::{
+    IncomingClient, ServerStreaming, StreamingClient, StreamingClientStatus, StreamingEvent,
+};
 
 type Result<T> = std::io::Result<T>;
 
@@ -15,13 +15,13 @@ pub struct StreamThread {
 }
 
 pub struct StreamThreadInner {
-    audio_streams: HashMap<Token, AudioStream>,
+    audio_streams: Vec<(StreamingClient, AudioStream)>,
 }
 
 impl StreamThread {
     pub fn launch_new(server: ServerStreaming) -> Result<StreamThread> {
         let inner = Arc::new(Mutex::new(StreamThreadInner {
-            audio_streams: HashMap::new(),
+            audio_streams: Vec::new(),
         }));
 
         let result_inner = inner.clone();
@@ -32,45 +32,55 @@ impl StreamThread {
             loop {
                 let event = server.streaming_next().unwrap();
 
-                let token = match event {
-                    StreamingEvent::Ready(t) => t,
-                    StreamingEvent::Close(t) => {
-                        let _audio_stream = inner.lock().unwrap().audio_streams.remove(&t).unwrap();
-                        debug!("closing audio stream {:?}", t);
-                        continue;
-                    }
+                match event {
+                    StreamingEvent::Event => {}
                     StreamingEvent::Shutdown => {
-                        debug!("shutdown command received");
+                        // TODO
                         break;
                     }
-                };
+                }
 
                 let inner = &mut *inner.lock().unwrap();
-                let audio_stream = inner
-                    .audio_streams
-                    .get_mut(&token)
-                    .expect("stream_thread nonexistent audio stream reported as writable");
 
-                let mut buf = BytesMut::new();
+                let mut remove_indices: Vec<usize> = Vec::new();
 
-                let result = audio_stream.next(|data| {
-                    buf.extend_from_slice(&data);
-                    data.len()
-                });
+                for (index, (client, audio_stream)) in inner.audio_streams.iter_mut().enumerate() {
+                    match client.status() {
+                        StreamingClientStatus::Waiting => {
+                            continue;
+                        }
+                        StreamingClientStatus::Closed => {
+                            remove_indices.push(index);
+                        }
+                        StreamingClientStatus::Ready => {
+                            let mut buf = BytesMut::new();
 
-                trace!(
-                    "received {} bytes from audio stream {:?}, feeding",
-                    buf.len(),
-                    token
-                );
+                            let mut result = true;
 
-                if result {
-                    server.streaming_feed(token, &buf);
-                } else {
-                    debug!("draining audio stream {:?}", token);
+                            while result && buf.len() < 10 * 1024 {
+                                result = audio_stream.next(|data| {
+                                    buf.extend_from_slice(&data);
+                                    data.len()
+                                });
+                            }
 
-                    server.streaming_drain(token, &buf);
-                    inner.audio_streams.remove(&token).unwrap();
+                            trace!("read {} bytes from audio stream, feeding", buf.len());
+
+                            if result {
+                                client.feed(&buf);
+                            } else {
+                                debug!("draining audio stream");
+
+                                client.drain(&buf);
+                                remove_indices.push(index);
+                            }
+                        }
+                    }
+                }
+
+                for index in remove_indices.iter().rev() {
+                    inner.audio_streams.remove(*index);
+                    debug!("removed audio stream");
                 }
             }
 
@@ -82,16 +92,20 @@ impl StreamThread {
         })
     }
 
-    pub fn add_audio_stream(&self, client: Client, audio_stream: AudioStream) -> Result<()> {
+    pub fn add_audio_stream(
+        &self,
+        client: IncomingClient,
+        audio_stream: AudioStream,
+    ) -> Result<()> {
         let inner = &mut *self.inner.lock().unwrap();
 
         let mut response = HttpResponse::new();
         response.content_type("audio/mpeg");
 
-        let token = client.add_stream(response.to_bytes())?;
-        inner.audio_streams.insert(token, audio_stream);
+        let client = client.into_stream(response.to_bytes())?;
+        inner.audio_streams.push((client, audio_stream));
 
-        debug!("added audio stream {:?}", token);
+        debug!("added audio stream");
 
         Ok(())
     }

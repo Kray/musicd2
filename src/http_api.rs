@@ -15,7 +15,7 @@ use crate::audio_stream::AudioStream;
 use crate::http::{self, HttpError, HttpQuery, HttpRequest, HttpResponse};
 use crate::index::NodeType;
 use crate::media_image;
-use crate::server::{Client, Receive, ServerIncoming};
+use crate::server::{IncomingClient, IncomingResult, Receive, ServerIncoming};
 use crate::stream_thread::StreamThread;
 use crate::Musicd;
 
@@ -67,7 +67,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 struct ApiRequest {
     request: HttpRequest,
     musicd: Arc<Musicd>,
-    client: Option<Client>,
+    client: Option<IncomingClient>,
 }
 
 impl ApiRequest {
@@ -86,7 +86,7 @@ impl ApiRequest {
         Ok(response)
     }
 
-    fn take_client(&mut self) -> Client {
+    fn take_client(&mut self) -> IncomingClient {
         self.client.take().unwrap()
     }
 }
@@ -106,7 +106,7 @@ pub fn run_api(
     server.add_listener(tcp_listener).unwrap();
 
     loop {
-        let (client, request) = server
+        let incoming_result = server
             .receive_next_fn(|b| match http::parse_request_headers(b) {
                 Ok(r) => match r {
                     Some(r) => Receive::Receive(r),
@@ -119,10 +119,15 @@ pub fn run_api(
             })
             .unwrap();
 
-        let mut api_request = ApiRequest {
-            request,
-            musicd: musicd.clone(),
-            client: Some(client),
+        let mut api_request = match incoming_result {
+            IncomingResult::Request(client, request) => ApiRequest {
+                request,
+                musicd: musicd.clone(),
+                client: Some(client),
+            },
+            IncomingResult::Shutdown => {
+                break;
+            }
         };
 
         let stream_thread = stream_thread.clone();
@@ -180,6 +185,8 @@ pub fn run_api(
                     }
                 }
             }
+
+            debug!("finish threadpool func");
         });
     }
 }
@@ -289,7 +296,7 @@ fn api_image_file(r: &ApiRequest) -> Result<HttpResponse> {
         }
 
         let mut c = Cursor::new(Vec::new());
-        image_obj.write_to(&mut c, image::ImageOutputFormat::JPEG(200))?;
+        image_obj.write_to(&mut c, image::ImageOutputFormat::JPEG(70))?;
 
         c.seek(SeekFrom::Start(0))?;
         let mut image_data = Vec::new();
@@ -681,7 +688,14 @@ fn api_albums(r: &ApiRequest) -> Result<HttpResponse> {
         "artist_name",
         "Album.artist_name LIKE ? COLLATE NOCASE",
     );
-    opts.bind_filter_str(&query, "search", "Album.name LIKE ? COLLATE NOCASE");
+
+    if let Some(search) = query.get_str("search") {
+        let mut values: Vec<Box<dyn ToSql>> = Vec::new();
+        values.push(Box::new(format!("%{}%", search)));
+        values.push(Box::new(format!("%{}%", search)));
+
+        opts.filter_values("(Album.name LIKE ? OR Album.artist_name LIKE ?)", values);
+    }
 
     opts.bind_range(&query);
 

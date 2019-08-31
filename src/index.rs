@@ -7,9 +7,9 @@ use std::sync::Arc;
 use rusqlite::{params, Connection, Result, Row, NO_PARAMS};
 use serde::Serialize;
 
-use crate::Root;
 use crate::db_meta;
 use crate::schema;
+use crate::Root;
 
 #[derive(Debug, Copy, Clone, PartialEq, Serialize)]
 pub enum NodeType {

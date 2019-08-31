@@ -447,6 +447,8 @@ finish:
             result = STREAM_ERROR;
         }
 
+        self->finished = 1;
+
         result = STREAM_EOF;
     }
 

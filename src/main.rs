@@ -161,7 +161,9 @@ fn main() {
 
     let index = musicd.index();
 
-    if !matches.is_present("no-scan") {
+    if matches.is_present("no-scan") {
+        info!("scanning disabled");
+    } else {
         scan::scan(index);
     }
 

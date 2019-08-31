@@ -1,51 +1,36 @@
 use std::collections::HashMap;
 use std::error::Error as StdError;
 use std::io::{Read, Write};
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::TryRecvError;
+use std::sync::{Arc, Mutex, Weak};
 
 use bytes::BytesMut;
 use mio::net::{TcpListener, TcpStream};
-use mio::{Events, Poll, PollOpt, Ready, Token};
-use mio_extras::channel::{Receiver, Sender};
+use mio::{Event, Events, Poll, PollOpt, Ready, Token};
+use mio_extras::channel::{Receiver, SendError, Sender};
 
 type Result<T> = std::io::Result<T>;
 
-pub struct ServerIncoming {
-    handle: ServerHandle,
-    incoming_poll: Poll,
-}
+pub struct Server;
 
-pub struct Client {
-    tcp_stream: TcpStream,
-    handle: ServerHandle,
+pub struct ServerIncoming {
+    incoming_poll: Poll,
+    incoming_rx: Receiver<InternalIncomingEvent>,
+    server_tx: Arc<Mutex<Sender<InternalCommand>>>,
 }
 
 pub struct ServerStreaming {
-    handle: ServerHandle,
     streaming_poll: Poll,
-}
-
-#[derive(Clone)]
-struct ServerHandle {
-    inner: Arc<Mutex<ServerInner>>,
-    poll: Arc<Poll>,
-}
-
-struct ServerInner {
-    tx: Sender<ControlEvent>,
-    incoming_rx: Receiver<Token>,
     streaming_rx: Receiver<StreamingEvent>,
-    tokens: Vec<Token>,
-    clients: HashMap<Token, InternalClient>,
-    join_handle: Option<std::thread::JoinHandle<()>>,
+    _server_tx: Arc<Mutex<Sender<InternalCommand>>>,
 }
 
-#[derive(Debug)]
-enum InternalClient {
-    Listener(TcpListener),
-    Incoming(TcpStream, BytesMut),
-    Drain(TcpStream, BytesMut),
-    Streaming(TcpStream, BytesMut),
+pub struct IncomingClient {
+    internal: Arc<Mutex<InternalClient>>,
+}
+
+pub struct StreamingClient {
+    internal: Arc<Mutex<InternalClient>>,
 }
 
 #[derive(Debug)]
@@ -55,28 +40,86 @@ pub enum Receive<T> {
     None,
 }
 
-#[derive(Debug)]
-enum ControlEvent {
-    NewClient(Token, InternalClient),
-    FeedStream(Token),
+pub enum IncomingResult<T> {
+    Request(IncomingClient, T),
     Shutdown,
 }
 
 #[derive(Debug)]
 pub enum StreamingEvent {
-    Ready(Token),
-    Close(Token),
+    Event,
     Shutdown,
 }
 
-pub struct Server;
+#[derive(Debug)]
+pub enum StreamingClientStatus {
+    Ready,
+    Closed,
+    Waiting,
+}
+
+struct ServerThread {
+    clients: HashMap<Token, Arc<Mutex<InternalClient>>>,
+    server_tx: Weak<Mutex<Sender<InternalCommand>>>,
+    server_rx: Receiver<InternalCommand>,
+    incoming_tx: Sender<InternalIncomingEvent>,
+    streaming_tx: Sender<StreamingEvent>,
+    poll: Poll,
+    tokens: Vec<Token>,
+    listeners: HashMap<Token, InternalListener>,
+    rx_token: Token,
+}
+
+#[derive(Debug)]
+struct InternalListener {
+    token: Token,
+    listener: TcpListener,
+}
+
+struct InternalClient {
+    token: Option<Token>,
+    state: InternalClientState,
+    stream: TcpStream,
+    buffer: BytesMut,
+    server_tx: Arc<Mutex<Sender<InternalCommand>>>,
+}
+
+#[derive(Debug)]
+enum InternalClientState {
+    Incoming,
+    Waiting,
+    Drain,
+    Streaming,
+}
+
+enum InternalCommand {
+    AddListener(TcpListener),
+    Close(Arc<Mutex<InternalClient>>),
+    Waiting(Arc<Mutex<InternalClient>>),
+    Drain(Arc<Mutex<InternalClient>>, BytesMut),
+    Stream(Arc<Mutex<InternalClient>>, BytesMut),
+    StreamFeed(Arc<Mutex<InternalClient>>, BytesMut),
+    StreamDrain(Arc<Mutex<InternalClient>>, BytesMut),
+    Shutdown,
+}
+
+enum InternalIncomingEvent {
+    Receive(Arc<Mutex<InternalClient>>),
+}
+
+enum InternalResult {
+    Ok,
+    Unhandled,
+    Disconnected,
+}
 
 impl Server {
     pub fn launch_new() -> Result<(ServerIncoming, ServerStreaming)> {
-        let poll = Arc::new(Poll::new()?);
         let rx_token = Token(0);
 
-        let (incoming_tx, incoming_rx) = mio_extras::channel::channel::<Token>();
+        let (server_tx, server_rx) = mio_extras::channel::channel::<InternalCommand>();
+
+        let (incoming_tx, incoming_rx) = mio_extras::channel::channel::<InternalIncomingEvent>();
         let incoming_poll = Poll::new()?;
         incoming_poll.register(&incoming_rx, rx_token, Ready::readable(), PollOpt::edge())?;
 
@@ -84,327 +127,167 @@ impl Server {
         let streaming_poll = Poll::new()?;
         streaming_poll.register(&streaming_rx, rx_token, Ready::readable(), PollOpt::edge())?;
 
-        let (server_tx, server_rx) = mio_extras::channel::channel::<ControlEvent>();
-        poll.register(&server_rx, rx_token, Ready::readable(), PollOpt::edge())?;
+        let server_tx = Arc::new(Mutex::new(server_tx));
 
-        let inner = Arc::new(Mutex::new(ServerInner {
-            tx: server_tx,
-            incoming_rx,
-            streaming_rx,
-            tokens: (1..128).map(Token).collect(),
-            clients: HashMap::new(),
-            join_handle: None,
-        }));
-
-        let server_handle = ServerHandle {
-            inner: inner.clone(),
-            poll: poll.clone(),
-        };
+        let server_tx1 = server_tx.clone();
+        let server_tx2 = server_tx.clone();
 
         let result = (
             ServerIncoming {
-                handle: server_handle.clone(),
                 incoming_poll,
+                incoming_rx,
+                server_tx: server_tx1,
             },
             ServerStreaming {
-                handle: server_handle.clone(),
                 streaming_poll,
+                streaming_rx,
+                _server_tx: server_tx2,
             },
         );
 
-        let result_inner = inner.clone();
+        let mut thread = ServerThread {
+            clients: HashMap::new(),
+            server_tx: Arc::downgrade(&server_tx),
+            server_rx,
+            incoming_tx,
+            streaming_tx,
+            poll: Poll::new()?,
+            tokens: (1..1024).map(Token).collect(),
+            listeners: HashMap::new(),
+            rx_token: Token(0),
+        };
 
-        let join_handle = std::thread::spawn(move || {
-            debug!("started");
-
-            let mut events = Events::with_capacity(1024);
-
-            loop {
-                {
-                    poll.reregister(&server_rx, rx_token, Ready::readable(), PollOpt::edge())
-                        .unwrap();
-                }
-
-                poll.poll(&mut events, None).unwrap();
-
-                for event in events.iter() {
-                    let token = event.token();
-
-                    let inner = &mut *inner.lock().unwrap();
-
-                    if token == rx_token {
-                        match server_rx.try_recv().unwrap() {
-                            ControlEvent::NewClient(token, c) => match &c {
-                                InternalClient::Listener(tcp_listener) => {
-                                    poll.register(
-                                        tcp_listener,
-                                        token,
-                                        Ready::readable(),
-                                        PollOpt::edge(),
-                                    )
-                                    .unwrap();
-                                    inner.clients.insert(token, c);
-                                }
-                                InternalClient::Drain(tcp_stream, _) => {
-                                    poll.register(
-                                        tcp_stream,
-                                        token,
-                                        Ready::writable(),
-                                        PollOpt::edge(),
-                                    )
-                                    .unwrap();
-                                    inner.clients.insert(token, c);
-                                }
-                                InternalClient::Streaming(tcp_stream, _) => {
-                                    poll.register(
-                                        tcp_stream,
-                                        token,
-                                        Ready::writable(),
-                                        PollOpt::edge(),
-                                    )
-                                    .unwrap();
-                                    inner.clients.insert(token, c);
-                                }
-                                _ => {
-                                    unreachable!();
-                                }
-                            },
-                            ControlEvent::FeedStream(token) => {
-                                if let Some(InternalClient::Streaming(tcp_stream, _)) =
-                                    inner.clients.get(&token)
-                                {
-                                    poll.reregister(
-                                        tcp_stream,
-                                        token,
-                                        Ready::writable(),
-                                        PollOpt::edge(),
-                                    )
-                                    .unwrap();
-                                }
-                            }
-                            ControlEvent::Shutdown => {
-                                debug!("shutdown command received");
-                                streaming_tx.send(StreamingEvent::Shutdown).unwrap();
-                                return;
-                            }
-                        }
-                        continue;
-                    }
-
-                    let client = inner
-                        .clients
-                        .get_mut(&token)
-                        .expect("token without matching client from poll");
-
-                    match client {
-                        InternalClient::Listener(tcp_listener) => {
-                            let (tcp_stream, _address) = match tcp_listener.accept() {
-                                Ok(c) => c,
-                                Err(e) => {
-                                    error!("tcp accept error: {}", e.description());
-                                    continue;
-                                }
-                            };
-
-                            let token = match inner.tokens.pop() {
-                                Some(t) => t,
-                                None => {
-                                    error!("max connections reached");
-                                    continue;
-                                }
-                            };
-
-                            poll.register(&tcp_stream, token, Ready::readable(), PollOpt::edge())
-                                .unwrap();
-
-                            inner.clients.insert(
-                                token,
-                                InternalClient::Incoming(tcp_stream, BytesMut::new()),
-                            );
-                        }
-                        InternalClient::Incoming(tcp_stream, in_buf) => {
-                            let mut buf = [0; 1024];
-                            let n = match tcp_stream.read(&mut buf) {
-                                Ok(n) => n,
-                                Err(e) => {
-                                    error!("tcp read error: {}", e.description());
-                                    poll.deregister(tcp_stream).unwrap();
-                                    inner.clients.remove(&token);
-                                    inner.tokens.push(token);
-                                    continue;
-                                }
-                            };
-
-                            in_buf.extend_from_slice(&buf[0..n]);
-                            incoming_tx.send(token).unwrap();
-                        }
-                        InternalClient::Drain(tcp_stream, out_buf) => {
-                            let n = match tcp_stream.write(&out_buf) {
-                                Ok(n) => n,
-                                Err(e) => {
-                                    error!("tcp write error: {}", e.description());
-                                    poll.deregister(tcp_stream).unwrap();
-                                    inner.clients.remove(&token);
-                                    inner.tokens.push(token);
-                                    continue;
-                                }
-                            };
-
-                            out_buf.advance(n);
-
-                            if out_buf.is_empty() {
-                                poll.deregister(tcp_stream).unwrap();
-                                inner.clients.remove(&token);
-                                inner.tokens.push(token);
-                            }
-                        }
-                        InternalClient::Streaming(tcp_stream, out_buf) => {
-                            let n = match tcp_stream.write(&out_buf) {
-                                Ok(n) => n,
-                                Err(e) => {
-                                    error!("tcp write error: {}", e.description());
-                                    streaming_tx.send(StreamingEvent::Close(token)).unwrap();
-                                    poll.deregister(tcp_stream).unwrap();
-                                    inner.clients.remove(&token);
-                                    inner.tokens.push(token);
-                                    continue;
-                                }
-                            };
-
-                            out_buf.advance(n);
-
-                            if out_buf.is_empty() {
-                                poll.reregister(tcp_stream, token, Ready::empty(), PollOpt::edge())
-                                    .unwrap();
-                                streaming_tx.send(StreamingEvent::Ready(token)).unwrap();
-                            }
-                        }
-                    }
-                }
+        let _join_handle = std::thread::spawn(move || {
+            if let Err(e) = thread.run() {
+                error!("thread finished with error: {}", e.description());
             }
         });
-
-        result_inner.lock().unwrap().join_handle = Some(join_handle);
 
         Ok(result)
     }
 }
 
 impl ServerIncoming {
-    pub fn add_listener(&self, tcp_listener: TcpListener) -> Result<()> {
-        let inner = &mut *self.handle.inner.lock().unwrap();
-
-        let token = match inner.tokens.pop() {
-            Some(t) => t,
-            None => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "max connections reached",
-                ));
-            }
-        };
-
-        inner
-            .tx
-            .send(ControlEvent::NewClient(
-                token,
-                InternalClient::Listener(tcp_listener),
-            ))
+    pub fn add_listener(&self, listener: TcpListener) -> Result<()> {
+        self.server_tx
+            .lock()
+            .unwrap()
+            .send(InternalCommand::AddListener(listener))
             .unwrap();
-
         Ok(())
     }
 
-    pub fn receive_next_fn<F, T>(&self, process: F) -> std::io::Result<(Client, T)>
+    pub fn receive_next_fn<F, T>(&self, process: F) -> Result<IncomingResult<T>>
     where
         F: Fn(&[u8]) -> Receive<T>,
     {
         let mut events = Events::with_capacity(32);
         loop {
+            self.incoming_poll.reregister(
+                &self.incoming_rx,
+                Token(0),
+                Ready::readable(),
+                PollOpt::edge(),
+            )?;
             self.incoming_poll.poll(&mut events, None)?;
 
-            let inner = &mut *self.handle.inner.lock().unwrap();
-            let token = inner.incoming_rx.try_recv().unwrap();
-            let client = inner.clients.get_mut(&token).unwrap();
+            let event = match self.incoming_rx.try_recv() {
+                Ok(ev) => ev,
+                Err(err) => match err {
+                    TryRecvError::Empty => {
+                        continue;
+                    }
+                    TryRecvError::Disconnected => {
+                        return Ok(IncomingResult::Shutdown);
+                    }
+                },
+            };
 
-            if let InternalClient::Incoming(tcp_stream, bytes) = client {
-                match process(bytes) {
-                    Receive::Receive(v) => {
-                        if let InternalClient::Incoming(tcp_stream, _) =
-                            inner.clients.remove(&token).unwrap()
-                        {
-                            self.handle.poll.deregister(&tcp_stream).unwrap();
-                            inner.tokens.push(token);
+            match event {
+                InternalIncomingEvent::Receive(internal_client) => {
+                    let temp_client = internal_client.clone();
+                    let client = temp_client.lock().unwrap();
 
-                            let client = Client {
-                                handle: self.handle.clone(),
-                                tcp_stream,
+                    if client.token.is_none() {
+                        continue;
+                    }
+
+                    match process(&client.buffer) {
+                        Receive::Receive(v) => {
+                            return match self
+                                .server_tx
+                                .lock()
+                                .unwrap()
+                                .send(InternalCommand::Waiting(internal_client.clone()))
+                            {
+                                Ok(_) => Ok(IncomingResult::Request(
+                                    IncomingClient {
+                                        internal: internal_client.clone(),
+                                    },
+                                    v,
+                                )),
+                                Err(err) => match err {
+                                    SendError::Io(err) => Err(err),
+                                    SendError::Disconnected(_) => Ok(IncomingResult::Shutdown),
+                                },
                             };
-
-                            return Ok((client, v));
-                        } else {
-                            unreachable!();
                         }
+                        Receive::Invalid => {
+                            if let Err(err) = self
+                                .server_tx
+                                .lock()
+                                .unwrap()
+                                .send(InternalCommand::Close(internal_client.clone()))
+                            {
+                                return match err {
+                                    SendError::Io(err) => Err(err),
+                                    SendError::Disconnected(_) => Ok(IncomingResult::Shutdown),
+                                };
+                            }
+                        }
+                        Receive::None => {}
                     }
-                    Receive::Invalid => {
-                        self.handle.poll.deregister(tcp_stream).unwrap();
-                        inner.clients.remove(&token).unwrap();
-                        inner.tokens.push(token);
-                    }
-                    Receive::None => {}
                 }
             }
         }
     }
 }
 
-impl Client {
-    pub fn send(self, data: &[u8]) -> std::io::Result<()> {
-        let inner = &mut *self.handle.inner.lock().unwrap();
-
-        let token = match inner.tokens.pop() {
-            Some(t) => t,
-            None => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "max connections reached",
-                ));
+impl IncomingClient {
+    pub fn send(self, data: &[u8]) -> Result<()> {
+        let internal_temp = self.internal.clone();
+        let internal = internal_temp.lock().unwrap();
+        if internal.token.is_some() {
+            if let Err(SendError::Io(err)) = internal
+                .server_tx
+                .lock()
+                .unwrap()
+                .send(InternalCommand::Drain(self.internal, BytesMut::from(data)))
+            {
+                return Err(err);
             }
-        };
-
-        inner
-            .tx
-            .send(ControlEvent::NewClient(
-                token,
-                InternalClient::Drain(self.tcp_stream, BytesMut::from(data)),
-            ))
-            .unwrap();
+        }
 
         Ok(())
     }
 
-    pub fn add_stream(self, out_buf: BytesMut) -> std::io::Result<Token> {
-        let inner = &mut *self.handle.inner.lock().unwrap();
-
-        let token = match inner.tokens.pop() {
-            Some(t) => t,
-            None => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "max connections reached",
-                ));
+    pub fn into_stream(self, out_buf: BytesMut) -> Result<StreamingClient> {
+        let internal_temp = self.internal.clone();
+        let internal = internal_temp.lock().unwrap();
+        if internal.token.is_some() {
+            if let Err(SendError::Io(err)) = internal
+                .server_tx
+                .lock()
+                .unwrap()
+                .send(InternalCommand::Stream(self.internal.clone(), out_buf))
+            {
+                return Err(err);
             }
-        };
+        }
 
-        inner
-            .tx
-            .send(ControlEvent::NewClient(
-                token,
-                InternalClient::Streaming(self.tcp_stream, out_buf),
-            ))
-            .unwrap();
-
-        Ok(token)
+        Ok(StreamingClient {
+            internal: self.internal,
+        })
     }
 }
 
@@ -412,56 +295,413 @@ impl ServerStreaming {
     pub fn streaming_next(&self) -> Result<StreamingEvent> {
         let mut events = Events::with_capacity(32);
 
-        {
-            let inner = &mut *self.handle.inner.lock().unwrap();
+        loop {
             self.streaming_poll.reregister(
-                &inner.streaming_rx,
+                &self.streaming_rx,
                 Token(0),
                 Ready::readable(),
                 PollOpt::edge(),
             )?;
+            self.streaming_poll.poll(&mut events, None)?;
+
+            let event = match self.streaming_rx.try_recv() {
+                Ok(ev) => ev,
+                Err(err) => match err {
+                    TryRecvError::Empty => {
+                        continue;
+                    }
+                    TryRecvError::Disconnected => {
+                        return Ok(StreamingEvent::Shutdown);
+                    }
+                },
+            };
+
+            return Ok(event);
         }
+    }
+}
 
-        self.streaming_poll.poll(&mut events, None).unwrap();
+impl StreamingClient {
+    pub fn status(&self) -> StreamingClientStatus {
+        let internal = self.internal.lock().unwrap();
 
-        let inner = &mut *self.handle.inner.lock().unwrap();
-        let event = inner.streaming_rx.try_recv().unwrap();
-
-        Ok(event)
+        if internal.token.is_none() {
+            StreamingClientStatus::Closed
+        } else if internal.buffer.is_empty() {
+            StreamingClientStatus::Ready
+        } else {
+            StreamingClientStatus::Waiting
+        }
     }
 
-    pub fn streaming_feed(&self, token: Token, data: &[u8]) {
-        let inner = &mut *self.handle.inner.lock().unwrap();
-        if let Some(client) = inner.clients.get_mut(&token) {
-            if let InternalClient::Streaming(_, out_buf) = client {
-                let n = out_buf.len();
+    pub fn feed(&self, data: &[u8]) {
+        let internal = self.internal.lock().unwrap();
 
-                out_buf.extend_from_slice(data);
+        if internal.token.is_some() {
+            let _ = internal
+                .server_tx
+                .lock()
+                .unwrap()
+                .send(InternalCommand::StreamFeed(
+                    self.internal.clone(),
+                    BytesMut::from(data),
+                ));
+        }
+    }
 
-                if n == 0 {
-                    inner.tx.send(ControlEvent::FeedStream(token)).unwrap();
+    pub fn drain(&self, data: &[u8]) {
+        let internal = self.internal.lock().unwrap();
+
+        if internal.token.is_some() {
+            let _ = internal
+                .server_tx
+                .lock()
+                .unwrap()
+                .send(InternalCommand::StreamDrain(
+                    self.internal.clone(),
+                    BytesMut::from(data),
+                ));
+        }
+    }
+}
+
+impl ServerThread {
+    fn run(&mut self) -> Result<()> {
+        debug!("started");
+
+        self.poll.register(
+            &self.server_rx,
+            self.rx_token,
+            Ready::readable(),
+            PollOpt::edge(),
+        )?;
+
+        let mut events = Events::with_capacity(1024);
+
+        'main: loop {
+            self.poll.poll(&mut events, None)?;
+
+            for event in events.iter() {
+                let event_token = event.token();
+
+                if event_token == self.rx_token {
+                    match self.process_server_rx()? {
+                        InternalResult::Ok => {
+                            continue;
+                        }
+                        InternalResult::Unhandled => {
+                            unreachable!();
+                        }
+                        InternalResult::Disconnected => {
+                            break 'main;
+                        }
+                    }
+                }
+
+                match self.try_process_listener(&event)? {
+                    InternalResult::Ok => continue,
+                    InternalResult::Unhandled => {}
+                    InternalResult::Disconnected => {
+                        break 'main;
+                    }
+                }
+
+                match self.try_process_client(&event)? {
+                    InternalResult::Ok => {}
+                    InternalResult::Unhandled => {
+                        error!("token without matching client from poll");
+                        continue;
+                    }
+                    InternalResult::Disconnected => {
+                        break 'main;
+                    }
                 }
             }
         }
+
+        debug!("stopping");
+
+        Ok(())
     }
 
-    pub fn streaming_drain(&self, token: Token, data: &[u8]) {
-        let inner = &mut *self.handle.inner.lock().unwrap();
+    fn process_server_rx(&mut self) -> Result<InternalResult> {
+        let command = match self.server_rx.try_recv() {
+            Ok(c) => c,
+            Err(err) => {
+                return Ok(match err {
+                    TryRecvError::Empty => InternalResult::Ok,
+                    TryRecvError::Disconnected => InternalResult::Disconnected,
+                });
+            }
+        };
 
-        if let Some(InternalClient::Streaming(tcp_stream, mut out_buf)) =
-            inner.clients.remove(&token)
-        {
-            self.handle.poll.deregister(&tcp_stream).unwrap();
+        self.poll.reregister(
+            &self.server_rx,
+            self.rx_token,
+            Ready::readable(),
+            PollOpt::edge(),
+        )?;
 
-            out_buf.extend_from_slice(data);
-
-            inner
-                .tx
-                .send(ControlEvent::NewClient(
-                    token,
-                    InternalClient::Drain(tcp_stream, out_buf),
-                ))
-                .unwrap();
+        match command {
+            InternalCommand::AddListener(listener) => match self.tokens.pop() {
+                Some(token) => {
+                    self.poll
+                        .register(&listener, token, Ready::readable(), PollOpt::edge())?;
+                    self.listeners
+                        .insert(token, InternalListener { token, listener });
+                }
+                None => {
+                    error!("max connections reached");
+                }
+            },
+            InternalCommand::Close(client) => {
+                let mut client = client.lock().unwrap();
+                if let Some(token) = client.token.take() {
+                    self.poll.deregister(&client.stream)?;
+                    self.clients.remove(&token);
+                    self.tokens.push(token);
+                }
+            }
+            InternalCommand::Waiting(client) => {
+                let mut client = client.lock().unwrap();
+                if let Some(token) = client.token {
+                    self.poll
+                        .reregister(&client.stream, token, Ready::empty(), PollOpt::edge())?;
+                    client.state = InternalClientState::Waiting;
+                }
+            }
+            InternalCommand::Drain(client, buffer) => {
+                let mut client = client.lock().unwrap();
+                if let Some(token) = client.token {
+                    self.poll.reregister(
+                        &client.stream,
+                        token,
+                        Ready::writable(),
+                        PollOpt::edge(),
+                    )?;
+                    client.state = InternalClientState::Drain;
+                    client.buffer = buffer;
+                }
+            }
+            InternalCommand::Stream(client, buffer) => {
+                let mut client = client.lock().unwrap();
+                if let Some(token) = client.token {
+                    self.poll.reregister(
+                        &client.stream,
+                        token,
+                        Ready::writable(),
+                        PollOpt::edge(),
+                    )?;
+                    client.state = InternalClientState::Streaming;
+                    client.buffer = buffer;
+                }
+            }
+            InternalCommand::StreamFeed(client, buffer) => {
+                let mut client = client.lock().unwrap();
+                if let Some(token) = client.token {
+                    self.poll.reregister(
+                        &client.stream,
+                        token,
+                        Ready::writable(),
+                        PollOpt::edge(),
+                    )?;
+                    client.buffer.extend_from_slice(&buffer);
+                }
+            }
+            InternalCommand::StreamDrain(client, buffer) => {
+                let mut client = client.lock().unwrap();
+                if let Some(token) = client.token {
+                    self.poll.reregister(
+                        &client.stream,
+                        token,
+                        Ready::writable(),
+                        PollOpt::edge(),
+                    )?;
+                    client.state = InternalClientState::Drain;
+                    client.buffer.extend_from_slice(&buffer);
+                }
+            }
+            InternalCommand::Shutdown => {
+                return Ok(InternalResult::Disconnected);
+            }
         }
+
+        Ok(InternalResult::Ok)
+    }
+
+    fn try_process_listener(&mut self, event: &Event) -> Result<InternalResult> {
+        let event_token = event.token();
+
+        if let Some(listener) = self.listeners.get_mut(&event_token) {
+            let (stream, address) = match listener.listener.accept() {
+                Ok(c) => c,
+                Err(e) => {
+                    error!("tcp accept error: {}", e.description());
+                    return Ok(InternalResult::Ok);
+                }
+            };
+
+            self.poll.reregister(
+                &listener.listener,
+                listener.token,
+                Ready::readable(),
+                PollOpt::edge(),
+            )?;
+
+            let token = match self.tokens.pop() {
+                Some(t) => t,
+                None => {
+                    error!("max connections reached");
+                    return Ok(InternalResult::Ok);
+                }
+            };
+
+            self.poll
+                .register(&stream, token, Ready::readable(), PollOpt::edge())?;
+
+            trace!("accepted client from {}", address);
+
+            self.clients.insert(
+                token,
+                Arc::new(Mutex::new(InternalClient {
+                    token: Some(token),
+                    state: InternalClientState::Incoming,
+                    stream,
+                    buffer: BytesMut::new(),
+                    server_tx: match self.server_tx.upgrade() {
+                        Some(tx) => tx,
+                        None => {
+                            return Ok(InternalResult::Disconnected);
+                        }
+                    },
+                })),
+            );
+
+            Ok(InternalResult::Ok)
+        } else {
+            Ok(InternalResult::Unhandled)
+        }
+    }
+
+    fn try_process_client(&mut self, event: &Event) -> Result<InternalResult> {
+        let event_token = event.token();
+
+        let mutex_client = match self.clients.get_mut(&event_token) {
+            Some(c) => c,
+            None => {
+                return Ok(InternalResult::Unhandled);
+            }
+        };
+
+        let temp_client = mutex_client.clone();
+        let mut client = temp_client.lock().unwrap();
+
+        match client.state {
+            InternalClientState::Incoming => {
+                if event.readiness().is_readable() {
+                    let mut buf = [0; 1024];
+                    let n = match client.stream.read(&mut buf) {
+                        Ok(n) => n,
+                        Err(e) => {
+                            error!("tcp read error: {}", e.description());
+
+                            self.poll.deregister(&client.stream)?;
+                            let token = client.token.take().unwrap();
+                            self.clients.remove(&token);
+                            self.tokens.push(token);
+
+                            return Ok(InternalResult::Ok);
+                        }
+                    };
+
+                    client.buffer.extend_from_slice(&buf[0..n]);
+
+                    if let Err(SendError::Disconnected(_)) = self
+                        .incoming_tx
+                        .send(InternalIncomingEvent::Receive(mutex_client.clone()))
+                    {
+                        return Ok(InternalResult::Disconnected);
+                    }
+                }
+
+                self.poll.reregister(
+                    &client.stream,
+                    client.token.unwrap(),
+                    Ready::readable(),
+                    PollOpt::edge(),
+                )?;
+            }
+            InternalClientState::Waiting => {
+                self.poll.reregister(
+                    &client.stream,
+                    client.token.unwrap(),
+                    Ready::empty(),
+                    PollOpt::edge(),
+                )?;
+            }
+            InternalClientState::Drain | InternalClientState::Streaming => {
+                if event.readiness().is_writable() {
+                    let buf = client.buffer.clone();
+                    let n = match client.stream.write(&buf) {
+                        Ok(n) => n,
+                        Err(e) => {
+                            error!("tcp write error: {}", e.description());
+
+                            self.poll.deregister(&client.stream)?;
+                            let token = client.token.take().unwrap();
+                            self.clients.remove(&token);
+                            self.tokens.push(token);
+
+                            if let InternalClientState::Streaming = client.state {
+                                if let Err(SendError::Disconnected(_)) =
+                                    self.streaming_tx.send(StreamingEvent::Event)
+                                {
+                                    return Ok(InternalResult::Disconnected);
+                                }
+                            }
+
+                            return Ok(InternalResult::Ok);
+                        }
+                    };
+
+                    client.buffer.advance(n);
+                }
+
+                if client.buffer.is_empty() {
+                    match client.state {
+                        InternalClientState::Drain => {
+                            self.poll.deregister(&client.stream)?;
+                            let token = client.token.take().unwrap();
+                            self.clients.remove(&token);
+                            self.tokens.push(token);
+                        }
+                        InternalClientState::Streaming => {
+                            self.poll.reregister(
+                                &client.stream,
+                                client.token.unwrap(),
+                                Ready::empty(),
+                                PollOpt::edge(),
+                            )?;
+
+                            if let Err(SendError::Disconnected(_)) =
+                                self.streaming_tx.send(StreamingEvent::Event)
+                            {
+                                return Ok(InternalResult::Disconnected);
+                            }
+                        }
+                        _ => unreachable!(),
+                    }
+                } else {
+                    self.poll.reregister(
+                        &client.stream,
+                        client.token.unwrap(),
+                        Ready::writable(),
+                        PollOpt::edge(),
+                    )?;
+                }
+            }
+        }
+
+        Ok(InternalResult::Ok)
     }
 }
