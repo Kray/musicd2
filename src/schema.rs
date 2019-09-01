@@ -82,7 +82,7 @@ CREATE TABLE TrackLyrics (
     lyrics TEXT,
     provider TEXT,
     source TEXT,
-    modified INTEGER NOT NULL
+    modified INTEGER NOT NULL,
     FOREIGN KEY(track_id) REFERENCES Track(track_id) ON DELETE CASCADE);
     
 CREATE TABLE StoreTrack (
