@@ -12,6 +12,7 @@ cc = "1.0"
 bytes = "0.4.12"
 chrono = "0.4.7"
 clap = "2.33.0"
+curl = "0.4.23"
 image = { version = "0.22.1", default-features = false, features = ["gif_codec", "jpeg", "ico", "png_codec", "pnm", "tga", "tiff", "webp", "bmp", "hdr", "dxt"] }
 libc = "0.2.59"
 log = "0.4.8"

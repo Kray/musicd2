@@ -9,6 +9,7 @@ mod http;
 mod http_api;
 mod index;
 mod logger;
+mod lyrics;
 mod media_image;
 mod media_info;
 mod musicd_c;

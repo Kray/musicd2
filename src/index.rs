@@ -79,7 +79,16 @@ pub struct Album {
 #[derive(Debug, Clone)]
 pub struct Artist {
     pub artist_id: i64,
-    name: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct TrackLyrics {
+    pub track_id: i64,
+    pub lyrics: Option<String>,
+    pub provider: Option<String>,
+    pub source: Option<String>,
+    pub modified: i64,
 }
 
 pub struct IndexSource {
@@ -599,6 +608,51 @@ impl Index {
         }
 
         Ok(None)
+    }
+
+    fn _get_track_lyrics(row: &Row) -> Result<TrackLyrics> {
+        Ok(TrackLyrics {
+            track_id: row.get(0)?,
+            lyrics: row.get(1)?,
+            provider: row.get(2)?,
+            source: row.get(3)?,
+            modified: row.get(4)?,
+        })
+    }
+
+    pub fn track_lyrics(&self, track_id: i64) -> Result<Option<TrackLyrics>> {
+        trace!("get track lyrics track_id={}", track_id);
+
+        let mut st = self.conn.prepare(
+            "SELECT TrackLyrics.track_id, TrackLyrics.lyrics, TrackLyrics.provider, TrackLyrics.source, TrackLyrics.modified
+                FROM TrackLyrics
+                WHERE track_id = ?",
+        )?;
+
+        let mut rows = st.query(&[track_id])?;
+
+        if let Some(row) = rows.next()? {
+            Ok(Some(Self::_get_track_lyrics(row)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn set_track_lyrics(&self, track_lyrics: &TrackLyrics) -> Result<TrackLyrics> {
+        let mut st = self.conn.prepare("INSERT OR REPLACE INTO TrackLyrics (track_id, lyrics, provider, source, modified) VALUES (?, ?, ?, ?, strftime('%s','now'))")?;
+
+        st.execute(params![
+            track_lyrics.track_id,
+            track_lyrics.lyrics,
+            track_lyrics.provider,
+            track_lyrics.source,
+        ])?;
+
+        let result = self.track_lyrics(self.conn.last_insert_rowid())?.unwrap();
+
+        debug!("set {:?}", result);
+
+        Ok(result)
     }
 
     pub fn process_node_updates(&self, node_id: i64) -> Result<()> {

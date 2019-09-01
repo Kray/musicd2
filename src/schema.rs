@@ -76,6 +76,14 @@ CREATE TABLE AlbumImage (
 
 CREATE TABLE AlbumImagePattern (
     pattern TEXT);
+
+CREATE TABLE TrackLyrics (
+    track_id INTEGER PRIMARY KEY,
+    lyrics TEXT,
+    provider TEXT,
+    source TEXT,
+    modified INTEGER NOT NULL
+    FOREIGN KEY(track_id) REFERENCES Track(track_id) ON DELETE CASCADE);
     
 CREATE TABLE StoreTrack (
     store_track_id INTEGER PRIMARY KEY,

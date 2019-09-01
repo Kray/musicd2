@@ -14,6 +14,7 @@ use threadpool::ThreadPool;
 use crate::audio_stream::AudioStream;
 use crate::http::{self, HttpError, HttpQuery, HttpRequest, HttpResponse};
 use crate::index::NodeType;
+use crate::lyrics;
 use crate::media_image;
 use crate::server::{IncomingClient, IncomingResult, Receive, ServerIncoming};
 use crate::stream_thread::StreamThread;
@@ -139,6 +140,7 @@ pub fn run_api(
                 "/api/musicd" => api_musicd(&api_request),
                 "/api/audio_stream" => api_audio_stream(&mut api_request, &stream_thread),
                 "/api/image_file" => api_image_file(&api_request),
+                "/api/track_lyrics" => api_track_lyrics(&api_request),
                 "/api/nodes" => api_nodes(&api_request),
                 "/api/tracks" => api_tracks(&api_request),
                 "/api/artists" => api_artists(&api_request),
@@ -318,6 +320,64 @@ fn api_image_file(r: &ApiRequest) -> Result<HttpResponse> {
     response.content_type("image/jpeg").bytes_body(&image_data);
 
     Ok(response)
+}
+
+fn api_track_lyrics(r: &ApiRequest) -> Result<HttpResponse> {
+    let track_id = match r.request.query().get_i64("track_id") {
+        Some(id) => id,
+        None => {
+            return r.err(400, "Bad Request");
+        }
+    };
+
+    let index = r.musicd.index();
+
+    let track = match index.track(track_id)? {
+        Some(t) => t,
+        None => {
+            return r.err(404, "Not Found");
+        }
+    };
+
+    let lyrics = if let Some(track_lyrics) = index.track_lyrics(track_id)? {
+        track_lyrics
+    } else {
+        let track_lyrics = match lyrics::try_fetch_lyrics(&track.artist_name, &track.title) {
+            Ok(lyrics) => match lyrics {
+                Some(l) => crate::index::TrackLyrics {
+                    track_id,
+                    lyrics: Some(l.lyrics),
+                    provider: Some(l.provider),
+                    source: Some(l.source),
+                    modified: 0,
+                },
+                None => crate::index::TrackLyrics {
+                    track_id,
+                    lyrics: None,
+                    provider: None,
+                    source: None,
+                    modified: 0,
+                },
+            },
+            Err(e) => {
+                error!("fetching lyrics failed: {}", e.description());
+                return r.err(500, "Internal Server Error");
+            }
+        };
+
+        index.set_track_lyrics(&track_lyrics)?
+    };
+
+    r.json(
+        &json!({
+            "track_id": lyrics.track_id,
+            "lyrics": lyrics.lyrics,
+            "provider": lyrics.provider,
+            "source": lyrics.source,
+            "modified": lyrics.modified,
+        })
+        .to_string(),
+    )
 }
 
 struct QueryOptions {
