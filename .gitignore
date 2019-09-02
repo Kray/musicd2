@@ -1,4 +1,4 @@
 /target
-/test
 **/*.rs.bk
+/test
 vgcore.*
