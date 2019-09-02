@@ -146,6 +146,7 @@ pub fn run_api(
                 "/api/artists" => api_artists(&api_request),
                 "/api/albums" => api_albums(&api_request),
                 "/api/images" => api_images(&api_request),
+                "/share" => res_share(&api_request),
                 _ => {
                     let mut response = HttpResponse::new();
                     response.status("404 Not Found").text_body("404 Not Found");
@@ -873,4 +874,15 @@ fn api_images(r: &ApiRequest) -> Result<HttpResponse> {
         })
         .to_string(),
     )
+}
+
+fn res_share(_r: &ApiRequest) -> Result<HttpResponse> {
+    let mut response = HttpResponse::new();
+
+    response
+        .status("200 OK")
+        .content_type("text/html; charset=utf-8")
+        .bytes_body(include_bytes!("./share.html"));
+
+    Ok(response)
 }

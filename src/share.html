@@ -1,0 +1,219 @@
+<!doctype html>
+<html>
+    <head>
+        <title>musicd2 share</title>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+
+        <style type="text/css">
+            html, body {
+                margin: 0;
+                padding: 0;
+                height: 100%;
+                font-family: Helvetica, sans-serif;
+                font-size: 16px;
+            }
+
+            body {
+                display: flex;
+                justify-content: center;
+                align-items: center;
+            }
+
+            #loading {
+                text-transform: uppercase;
+            }
+
+            #error {
+                width: 300px;
+                padding: 2rem;
+                background: #ae1f00;
+                color: #fff;
+            }
+
+            #content {
+                width: 300px;
+                padding: 1rem;
+            }
+
+            #album_image {
+                background: #eee;
+                background-size: contain;
+                padding-top: 100%;
+                margin-bottom: 1rem;
+            }
+            
+            #track_info {
+                margin-bottom: 1rem;
+            }
+
+            #track_info > div {
+                margin-bottom: .25rem;
+            }
+
+            #controls {
+                display: flex;
+                flex-direction: row;
+                justify-content: space-between;
+            }
+
+            #control_play, #control_pause {
+                text-transform: uppercase;
+                font-weight: bold;
+                line-height: 1.5rem;
+            }
+
+            #play_position_div {
+                line-height: 1.5rem;
+            }
+        </style>
+    </head>
+    <body>
+        <div id="loading">
+            Loading...
+        </div>
+        <div id="error" style="display: none;"></div>
+        <div id="content" style="display: none;">
+            <div id="album_image"></div>
+
+            <div id="track_info">
+                <div id="track_title_div"><strong id="track_title"></strong></div>
+                <div id="artist_name_div" style="display: none;">by
+                    <strong id="artist_name"></strong>
+                </div>
+                <div id="album_name_div" style="display: none;">on 
+                    <strong id="album_name"></strong>
+                </div>
+            </div>
+
+            <div id="controls">
+                <div>
+                    <button id="control_play">▶ play</button>
+                    <button id="control_pause" style="display: none;">▮▮ pause</button>
+                </div>
+
+                <div id="play_position_div">
+                    <span id="play_position">00:00</span> / <span id="track_length">00:00</span>
+                </div>
+            </div>
+        </div>
+
+        <script type="text/javascript">
+            (function () {
+                function get_query(key) {
+                    let match = new RegExp("(^|\\?|&)" + key + "=(.*)($|&)")
+                        .exec(window.location.href);
+
+                    if (!match) {
+                        return null;
+                    }
+
+                    return match[2];
+                }
+
+                function time_to_text(time) {
+                    return (Math.floor(time / 60)).toString().padStart(2, "0") +
+                        ":" +
+                        (Math.round(time % 60)).toString().padStart(2, "0");
+                }
+
+                function display_error(error) {
+                    document.getElementById("loading").style.display = "none";
+                    document.getElementById("error").style.display = "block";
+                    document.getElementById("error").innerText = error;
+                }
+                
+                let track_id = get_query("track_id");
+                if (!track_id) {
+                    display_error("Invalid share url");
+                    return;
+                }
+                
+                let player = new Audio("/api/audio_stream?track_id=" + track_id);
+
+                let play = document.getElementById("control_play");
+                let pause = document.getElementById("control_pause");
+
+                play.onclick = function () {
+                    player.play();
+                    play.style.display = "none";
+                    pause.style.display = "block";
+                };
+
+                pause.onclick = function () {
+                    player.pause();
+                    play.style.display = "block";
+                    pause.style.display = "none";
+                };
+
+                player.ontimeupdate = function () {
+                    let time = player.currentTime;
+                    document.getElementById("play_position").innerText = time_to_text(time);
+                };
+
+                player.play()
+                    .then(function () {
+                        play.style.display = "none";
+                        pause.style.display = "block";
+                    })
+                    .catch(function () {
+                        play.style.display = "block";
+                        pause.style.display = "none";
+                    });
+
+                fetch("/api/tracks?track_id=" + track_id)
+                    .then(function (res) { return res.json(); })
+                    .then(function (res) {
+                        let track = res.items[0];
+
+                        if (!track) {
+                            display_error("Track doesn't exist");
+                            return;
+                        }
+
+                        document.getElementById("track_title").innerText =
+                            track.title ? track.title : "Untitled track";
+
+                        if (track.artist_name) {
+                            document.getElementById("artist_name_div").style.display = "block";
+                            document.getElementById("artist_name").innerText = track.artist_name;
+                        }
+                        
+                        if (track.album_name) {
+                            document.getElementById("album_name_div").style.display = "block";
+                            document.getElementById("album_name").innerText = track.album_name;
+                        }
+
+                        document.getElementById("track_length").innerText =
+                            time_to_text(track.length);
+
+                        let title = document.getElementsByTagName("title")[0];
+                        title.innerText = (track.title ? track.title : "Untitled track") +
+                            (track.artist_name ? " by " + track.artist_name : "") +
+                            (track.album_name ? " on " + track.album_name : "") +
+                            " - " + title.innerText;
+
+                        document.getElementById("loading").style.display = "none";
+                        document.getElementById("content").style.display = "block";
+
+                        if (track.album_id) {
+                            fetch("/api/albums?album_id=" + track.album_id)
+                                .then(function (res) { return res.json(); })
+                                .then(function (res) {
+                                    console.log(res);
+                                    let album = res.items[0];
+                                    if (album.image_id) {
+                                        document.getElementById("album_image").style.background =
+                                            "center / contain no-repeat url('/api/image_file?image_id=" + album.image_id + "')";
+                                    }
+                                });
+                        }
+                    })
+                    .catch(function () {
+                        display_error("An error occured while fetching track information");
+                    });
+            })();
+        </script>
+    </body>
+</html>
