@@ -384,17 +384,17 @@ impl Scan {
         fs_path: &Path,
     ) -> Result<Option<ScanStat>> {
         let extension = match fs_path.extension().and_then(|e| e.to_str()) {
-            Some(e) => e,
+            Some(e) => e.to_ascii_lowercase(),
             None => {
                 return Ok(None);
             }
         };
 
-        if let Some(stat) = self.try_process_cue_file(extension, parent, node, &fs_path)? {
+        if let Some(stat) = self.try_process_cue_file(&extension, parent, node, &fs_path)? {
             return Ok(Some(stat));
         }
 
-        if let Some(stat) = self.try_process_image_file(extension, node, &fs_path)? {
+        if let Some(stat) = self.try_process_image_file(&extension, node, &fs_path)? {
             return Ok(Some(stat));
         }
 
