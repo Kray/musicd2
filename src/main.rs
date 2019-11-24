@@ -35,6 +35,7 @@ pub struct Musicd {
     index_source: IndexSource,
     store_source: StoreSource,
     scan_thread: ScanThread,
+    password: String,
 }
 
 pub struct Root {
@@ -93,6 +94,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Arg::with_name("no-initial-scan")
                 .long("no-initial-scan")
                 .help("Disable initial scan"),
+        )
+        .arg(
+            Arg::with_name("password")
+                .long("password")
+                .help("Authentication password, empty disables authentication")
+                .default_value(""),
         )
         .arg(
             Arg::with_name("root")
@@ -158,6 +165,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         index_source,
         store_source,
         scan_thread,
+        password: matches.value_of("password").unwrap().to_string(),
     });
 
     let index = musicd.index();
