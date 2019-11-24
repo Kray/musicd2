@@ -163,7 +163,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let index = musicd.index();
 
     if matches.is_present("no-initial-scan") {
-        info!("scanning disabled");
+        info!("initial scan disabled");
     } else {
         musicd.scan_thread.start(index);
     }

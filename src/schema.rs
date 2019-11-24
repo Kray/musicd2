@@ -25,6 +25,9 @@ CREATE TABLE Node (
     modified INTEGER NOT NULL,
     FOREIGN KEY(parent_id) REFERENCES Node(node_id) ON DELETE CASCADE,
     FOREIGN KEY(master_id) REFERENCES Node(node_id) ON DELETE SET NULL);
+
+CREATE INDEX Node_parent_id ON Node (parent_id);
+CREATE INDEX Node_master_id ON Node (master_id);
     
 CREATE TABLE Track (
     track_id INTEGER PRIMARY KEY AUTOINCREMENT, 
@@ -45,6 +48,11 @@ CREATE TABLE Track (
     FOREIGN KEY(artist_id) REFERENCES Artist(artist_id),
     FOREIGN KEY(album_id) REFERENCES Album(album_id),
     FOREIGN KEY(album_artist_id) REFERENCES Artist(artist_id));
+
+CREATE INDEX Track_node_id ON Track (node_id);
+CREATE INDEX Track_artist_id ON Track (artist_id);
+CREATE INDEX Track_album_id ON Track (album_id);
+CREATE INDEX Track_album_artist_id ON Track (album_artist_id);
     
 CREATE TABLE Image (
     image_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -54,6 +62,8 @@ CREATE TABLE Image (
     width INTEGER NOT NULL,
     height INTEGER NOT NULL,
     FOREIGN KEY(node_id) REFERENCES Node(node_id) ON DELETE CASCADE);
+
+CREATE INDEX Image_node_id ON Image (node_id);
     
 CREATE TABLE Artist (
     artist_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -66,7 +76,9 @@ CREATE TABLE Album (
     artist_name TEXT,
     image_id INTEGER,
     FOREIGN KEY(image_id) REFERENCES Image(image_id) ON DELETE SET NULL);
-        
+
+CREATE INDEX Album_artist_id ON Album (album_id);
+
 CREATE TABLE AlbumImage (
     album_id INTEGER NOT NULL,
     image_id INTEGER NOT NULL,
