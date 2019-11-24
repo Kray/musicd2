@@ -46,7 +46,7 @@ pub struct Root {
 pub const MUSICD_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 impl Musicd {
-    pub fn cache(&self) -> Cache {
+    pub fn cache(&self) -> Box<dyn Cache> {
         self.cache_source.get().expect("can't open cache")
     }
 
@@ -82,6 +82,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .long("directory")
                 .help("Database directory")
                 .default_value("~/.musicd2"),
+        )
+        .arg(
+            Arg::with_name("disable-cache")
+                .long("disable-cache")
+                .help("Disable any use of cache"),
         )
         .arg(
             Arg::with_name("log-level")
@@ -146,7 +151,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     std::fs::create_dir_all(directory).expect("can't create directory");
 
-    let cache_source = CacheSource::create(directory.join("cache.db"), cache_limit)
+    let cache_path = if matches.is_present("disable-cache") {
+        None
+    } else {
+        Some(directory.join("cache.db"))
+    };
+
+    let cache_source = CacheSource::create(cache_path, cache_limit)
         .unwrap()
         .unwrap();
 
