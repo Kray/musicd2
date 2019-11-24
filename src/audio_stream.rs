@@ -91,11 +91,7 @@ impl AudioStream {
                 });
             }
 
-            trace!(
-                "read {} bytes from audio stream, feeding {:?}",
-                buf.len(),
-                std::thread::current().id()
-            );
+            trace!("read {} bytes from audio stream, feeding", buf.len());
 
             let result = if result {
                 sender.send(Ok(buf.take().to_vec())).await

@@ -257,13 +257,11 @@ fn api_audio_stream(r: &ApiRequest) -> Result<Response<Body>, Error> {
     let node = index.node(track.node_id)?.unwrap();
     let fs_path = index.map_fs_path(&node.path).unwrap();
 
-    let start = start + track.start.unwrap_or(0f64);
-
     let audio_stream = AudioStream::open(
         &fs_path,
         track.stream_index as i32,
         track.track_index.unwrap_or(0) as i32,
-        start,
+        start + track.start.unwrap_or_default(),
         if track.start.is_some() {
             track.length - start
         } else {
@@ -330,6 +328,11 @@ fn api_image_file(r: &ApiRequest) -> Result<Response<Body>, Error> {
         };
 
         let mut image_obj = if let Some(stream_index) = image.stream_index {
+            debug!(
+                "loading image data from media file '{}'",
+                fs_path.to_string_lossy()
+            );
+
             let image_data = match media::media_image_data_read(&fs_path, stream_index as i32) {
                 Some(i) => i,
                 None => {
@@ -339,10 +342,12 @@ fn api_image_file(r: &ApiRequest) -> Result<Response<Body>, Error> {
 
             image::load_from_memory_with_format(&image_data, image::ImageFormat::JPEG)
         } else {
+            debug!("loading image file '{}'", fs_path.to_string_lossy());
             image::open(&fs_path)
         }?;
 
         if size > 0 && size < std::cmp::max(image.width, image.height) {
+            debug!("resizing {}x{} to size {}", image.width, image.height, size);
             image_obj = image_obj.resize(size as u32, size as u32, image::FilterType::Lanczos3);
         }
 
