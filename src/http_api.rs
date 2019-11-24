@@ -159,9 +159,19 @@ fn api_musicd(_: &ApiRequest) -> Result<Response<Body>, Error> {
     Ok(json_ok("{}"))
 }
 
+static CODECS: &'static [(&'static str, &'static str)] = &[("mp3", "audio/mpeg"), ("opus", "audio/ogg")];
+
 fn api_audio_stream(r: &ApiRequest) -> Result<Response<Body>, Error> {
     let track_id = match r.query.get_i64("track_id") {
         Some(id) => id,
+        None => {
+            return Ok(bad_request());
+        }
+    };
+
+    let codec_req = r.query.get_str("codec").unwrap_or(CODECS[0].0);
+    let target_codec = match CODECS.iter().find(|c| c.0 == codec_req) {
+        Some(c) => c,
         None => {
             return Ok(bad_request());
         }
@@ -196,7 +206,7 @@ fn api_audio_stream(r: &ApiRequest) -> Result<Response<Body>, Error> {
         } else {
             0f64
         },
-        "mp3",
+        target_codec.0
     );
 
     let audio_stream = match audio_stream {
@@ -218,7 +228,7 @@ fn api_audio_stream(r: &ApiRequest) -> Result<Response<Body>, Error> {
     });
 
     Ok(Response::builder()
-        .header("Content-Type", "audio/mpeg")
+        .header("Content-Type", target_codec.1)
         .body(Body::wrap_stream(receiver))
         .unwrap())
 }

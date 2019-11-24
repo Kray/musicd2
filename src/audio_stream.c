@@ -123,7 +123,7 @@ struct AudioStream *audio_stream_open(const struct AudioStreamOptions *options) 
 
     // TODO copy metadata
 
-    self->encoder = avcodec_find_encoder(AV_CODEC_ID_MP3);
+    self->encoder = avcodec_find_encoder(self->out_ctx->oformat->audio_codec);
     if (!self->encoder) {
         lav_error("avcodec_find_encoder", 0);
         goto fail;
