@@ -264,6 +264,7 @@ pub struct TrackItem {
     album_id: i64,
     album_name: String,
     length: f64,
+    node_path: String,
 }
 
 pub fn query_tracks(
@@ -320,7 +321,14 @@ pub fn query_tracks(
             Track.artist_name,
             Track.album_id,
             Track.album_name,
-            Track.length
+            Track.length,
+
+            (
+                SELECT Node.path
+                FROM Node
+                WHERE Node.node_id = Track.node_id
+            ) AS node_path
+
         FROM Track",
     )?;
 
@@ -329,6 +337,8 @@ pub fn query_tracks(
     let mut items: Vec<TrackItem> = Vec::new();
 
     while let Some(row) = rows.next()? {
+        let path: Vec<u8> = row.get(9)?;
+
         items.push(TrackItem {
             track_id: row.get(0)?,
             node_id: row.get(1)?,
@@ -339,6 +349,7 @@ pub fn query_tracks(
             album_id: row.get(6)?,
             album_name: row.get(7)?,
             length: row.get(8)?,
+            node_path: OsStr::from_bytes(&path).to_string_lossy().to_string(),
         });
     }
 
