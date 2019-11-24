@@ -58,12 +58,12 @@ extern "C" fn log_c_callback(level: c_int, message: *const c_char) {
     };
 
     let c_str: &CStr = unsafe { CStr::from_ptr(message) };
-    let str_slice: &str = c_str.to_str().unwrap();
+    let string = String::from_utf8_lossy(c_str.to_bytes());
 
     LOG_C_BUF.with(|buf| {
         let buf = &mut *buf.borrow_mut();
 
-        *buf += str_slice;
+        *buf += &string;
 
         if buf.ends_with('\n') {
             buf.pop();
