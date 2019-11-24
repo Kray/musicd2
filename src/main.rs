@@ -26,12 +26,14 @@ use clap::Arg;
 
 use cache::{Cache, CacheSource};
 use index::{Index, IndexSource};
+use scan::ScanThread;
 use store::{Store, StoreSource};
 
 pub struct Musicd {
     cache_source: CacheSource,
     index_source: IndexSource,
     store_source: StoreSource,
+    scan_thread: ScanThread,
 }
 
 pub struct Root {
@@ -87,9 +89,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .possible_values(&["error", "warn", "info", "debug", "trace"]),
         )
         .arg(
-            Arg::with_name("no-scan")
-                .long("no-scan")
-                .help("Disable scanning"),
+            Arg::with_name("no-initial-scan")
+                .long("no-initial-scan")
+                .help("Disable initial scan"),
         )
         .arg(
             Arg::with_name("root")
@@ -148,18 +150,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap()
         .unwrap();
 
+    let scan_thread = scan::ScanThread::new();
+
     let musicd = Arc::new(Musicd {
         cache_source,
         index_source,
         store_source,
+        scan_thread,
     });
 
     let index = musicd.index();
 
-    if matches.is_present("no-scan") {
+    if matches.is_present("no-initial-scan") {
         info!("scanning disabled");
     } else {
-        scan::scan(index);
+        musicd.scan_thread.start(index);
     }
 
     let mut store = musicd.store();

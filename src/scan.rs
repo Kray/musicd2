@@ -4,6 +4,9 @@ use std::ffi::OsStr;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::JoinHandle;
 use std::time::Instant;
 
 use crate::cue;
@@ -47,7 +50,61 @@ impl StdError for Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+pub struct ScanThread {
+    stop: Arc<AtomicBool>,
+    join_handle: Mutex<Option<JoinHandle<ScanStat>>>,
+}
+
+impl ScanThread {
+    pub fn new() -> ScanThread {
+        ScanThread {
+            stop: Arc::new(AtomicBool::new(false)),
+            join_handle: Mutex::new(None),
+        }
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.join_handle.lock().unwrap().is_some()
+    }
+
+    pub fn start(&self, index: Index) {
+        {
+            if self.join_handle.lock().unwrap().is_some() {
+                return;
+            }
+        }
+
+        let stop = self.stop.clone();
+
+        let mut join_handle = self.join_handle.lock().unwrap();
+
+        self.stop.store(false, Ordering::Relaxed);
+        
+        *join_handle = Some(std::thread::spawn(move || {
+            let mut scan = Scan {
+                stop,
+                stop_detected: false,
+                index
+            };
+
+            scan.scan_core()
+        }));
+    }
+
+    pub fn stop(&self) {
+        let mut join_handle = self.join_handle.lock().unwrap();
+
+        self.stop.store(true, Ordering::Relaxed);
+
+        if let Some(handle) = join_handle.take() {
+            handle.join().unwrap();
+        }
+    }
+}
+
 struct Scan {
+    stop: Arc<AtomicBool>,
+    stop_detected: bool,
     index: Index,
 }
 
@@ -80,22 +137,39 @@ impl ScanStat {
     }
 }
 
-pub fn scan(index: Index) {
-    let mut scan = Scan { index };
-
-    scan.scan_core().unwrap();
-}
-
 impl Scan {
-    fn scan_core(&mut self) -> Result<()> {
+    fn interrupted(&mut self) -> bool {
+        let stop = self.stop.load(Ordering::Relaxed);
+
+        if stop && !self.stop_detected {
+            self.stop_detected = true;
+            debug!("interrupt noted, stopping");
+        }
+
+        stop
+    }
+
+    fn scan_core(&mut self) -> ScanStat {
         info!("started");
 
-        self.index
-            .connection()
-            .execute_batch("DELETE FROM AlbumImagePattern;")?;
+        let mut stat = ScanStat {
+            ..Default::default()
+        };
 
-        self.index.connection().execute_batch(
-            "
+        if self
+            .index
+            .connection()
+            .execute_batch("DELETE FROM AlbumImagePattern;")
+            .is_err()
+        {
+            return stat;
+        }
+
+        if self
+            .index
+            .connection()
+            .execute_batch(
+                "
                 INSERT INTO AlbumImagePattern (pattern)
                 VALUES
                     ('album cover'),
@@ -114,11 +188,11 @@ impl Scan {
                     ('%album%'),
                     ('%jacket%'),
                     ('%card%')",
-        )?;
-
-        let mut stat = ScanStat {
-            ..Default::default()
-        };
+            )
+            .is_err()
+        {
+            return stat;
+        }
 
         let roots: Vec<(String, PathBuf)> = self
             .index
@@ -130,6 +204,10 @@ impl Scan {
         let start_instant = Instant::now();
 
         for (name, path) in roots {
+            if self.interrupted() {
+                return stat;
+            }
+
             debug!("root '{}' = '{}'", name, path.to_string_lossy());
 
             match self.scan_node_unprepared(None, Path::new(OsStr::from_bytes(name.as_bytes()))) {
@@ -151,7 +229,7 @@ impl Scan {
 
         info!("done in {}s: {:?}", start_instant.elapsed().as_secs(), stat);
 
-        Ok(())
+        stat
     }
 
     fn scan_node_unprepared(
@@ -369,6 +447,10 @@ impl Scan {
         }
 
         for entry in fs_entries {
+            if self.interrupted() {
+                return Ok(Some(stat))
+            }
+
             if let Ok(Some(node_stat)) = self.scan_node_unprepared(Some(&node), Path::new(&entry)) {
                 stat.add(&node_stat);
             }

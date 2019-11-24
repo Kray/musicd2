@@ -116,6 +116,8 @@ async fn process_request(
         (&Method::GET, "/api/artists") => api_artists(&api_request),
         (&Method::GET, "/api/albums") => api_albums(&api_request),
         (&Method::GET, "/api/images") => api_images(&api_request),
+        (&Method::GET, "/api/scan") => api_scan(&api_request),
+        (&Method::POST, "/api/scan") => api_scan(&api_request),
         (&Method::GET, "/share") => res_share(&api_request),
         _ => Ok(not_found()),
     };
@@ -844,6 +846,31 @@ fn api_images(r: &ApiRequest) -> Result<Response<Body>, Error> {
             "items": items
         })
         .to_string(),
+    ))
+}
+
+fn api_scan(r: &ApiRequest) -> Result<Response<Body>, Error> {
+    if let Some(action) = r.query.get_str("action") {
+        match action {
+            "start" => {
+                r.musicd.scan_thread.start(r.musicd.index())
+            },
+            "restart" => {
+                r.musicd.scan_thread.stop();
+                r.musicd.scan_thread.start(r.musicd.index());
+            },
+            "stop" => {
+                r.musicd.scan_thread.stop();
+            },
+            _ => {}
+        }
+    }
+
+    Ok(json_ok(
+        &json!({
+            "running": r.musicd.scan_thread.is_running()
+        })
+        .to_string()
     ))
 }
 
