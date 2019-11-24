@@ -159,7 +159,11 @@ fn api_musicd(_: &ApiRequest) -> Result<Response<Body>, Error> {
     Ok(json_ok("{}"))
 }
 
-static CODECS: &'static [(&'static str, &'static str)] = &[("mp3", "audio/mpeg"), ("opus", "audio/ogg")];
+static CODECS: &[(&str, &str)] = &[
+    ("mp3", "audio/mpeg"),
+    ("opus", "audio/ogg"),
+    ("ogg", "audio/ogg"),
+];
 
 fn api_audio_stream(r: &ApiRequest) -> Result<Response<Body>, Error> {
     let track_id = match r.query.get_i64("track_id") {
@@ -206,7 +210,7 @@ fn api_audio_stream(r: &ApiRequest) -> Result<Response<Body>, Error> {
         } else {
             0f64
         },
-        target_codec.0
+        target_codec.0,
     );
 
     let audio_stream = match audio_stream {
