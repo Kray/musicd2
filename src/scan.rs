@@ -4,8 +4,8 @@ use std::ffi::OsStr;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Instant;
 
@@ -79,12 +79,12 @@ impl ScanThread {
         let mut join_handle = self.join_handle.lock().unwrap();
 
         self.stop.store(false, Ordering::Relaxed);
-        
+
         *join_handle = Some(std::thread::spawn(move || {
             let mut scan = Scan {
                 stop,
                 stop_detected: false,
-                index
+                index,
             };
 
             scan.scan_core()
@@ -448,7 +448,7 @@ impl Scan {
 
         for entry in fs_entries {
             if self.interrupted() {
-                return Ok(Some(stat))
+                return Ok(Some(stat));
             }
 
             if let Ok(Some(node_stat)) = self.scan_node_unprepared(Some(&node), Path::new(&entry)) {

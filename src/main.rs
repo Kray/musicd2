@@ -12,6 +12,7 @@ mod logger;
 mod lyrics;
 mod media;
 mod musicd_c;
+mod query;
 mod scan;
 mod schema;
 mod store;
