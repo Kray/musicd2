@@ -7,8 +7,7 @@ fn main() {
         .flag("-Wextra")
         .flag("-pedantic")
         .file("src/audio_stream.c")
-        .file("src/media_image.c")
-        .file("src/media_info.c")
+        .file("src/media.c")
         .file("src/musicd.c")
         .compile("libmusicdc.a");
 

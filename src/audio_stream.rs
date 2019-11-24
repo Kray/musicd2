@@ -1,7 +1,11 @@
+use std::error::Error as StdError;
 use std::ffi::CString;
 use std::os::raw::{c_int, c_void};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
+
+use bytes::BytesMut;
+use tokio::sync::mpsc::Sender;
 
 use crate::musicd_c;
 
@@ -68,6 +72,43 @@ impl AudioStream {
         unsafe {
             musicd_c::audio_stream_next(self.stream, cb as *mut _ as *mut c_void, stream_c_callback)
                 > 0
+        }
+    }
+
+    pub async fn execute(
+        mut self,
+        mut sender: Sender<Result<Vec<u8>, Box<dyn StdError + Send + Sync>>>,
+    ) {
+        loop {
+            let mut buf = BytesMut::new();
+
+            let mut result = true;
+
+            while result && buf.len() < 10 * 1024 {
+                result = self.next(|data| {
+                    buf.extend_from_slice(&data);
+                    data.len()
+                });
+            }
+
+            trace!(
+                "read {} bytes from audio stream, feeding {:?}",
+                buf.len(),
+                std::thread::current().id()
+            );
+
+            let result = if result {
+                sender.send(Ok(buf.take().to_vec())).await
+            } else {
+                debug!("audio stream finished, flushing channel");
+                let _ = sender.send(Ok(vec![])).await;
+                break;
+            };
+
+            if result.is_err() {
+                debug!("channel disconnected, stopping audio stream");
+                break;
+            }
         }
     }
 }

@@ -5,19 +5,16 @@ mod audio_stream;
 mod cache;
 mod cue;
 mod db_meta;
-mod http;
 mod http_api;
+mod http_util;
 mod index;
 mod logger;
 mod lyrics;
-mod media_image;
-mod media_info;
+mod media;
 mod musicd_c;
 mod scan;
 mod schema;
-mod server;
 mod store;
-mod stream_thread;
 
 use std::ffi::OsStr;
 use std::net::SocketAddr;
@@ -29,9 +26,7 @@ use clap::Arg;
 
 use cache::{Cache, CacheSource};
 use index::{Index, IndexSource};
-use server::Server;
 use store::{Store, StoreSource};
-use stream_thread::StreamThread;
 
 pub struct Musicd {
     cache_source: CacheSource,
@@ -62,7 +57,8 @@ impl Musicd {
     }
 }
 
-fn main() {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let matches = clap::App::new("musicd2")
         .version(MUSICD_VERSION)
         .arg(
@@ -169,9 +165,7 @@ fn main() {
     let mut store = musicd.store();
     store.synchronize().unwrap();
 
-    let (server_incoming, server_streaming) = Server::launch_new().unwrap();
+    http_api::run_api(musicd.clone(), bind).await;
 
-    let stream_thread = Arc::new(StreamThread::launch_new(server_streaming).unwrap());
-
-    http_api::run_api(musicd.clone(), bind, server_incoming, stream_thread.clone());
+    Ok(())
 }

@@ -5,27 +5,33 @@ use std::net::SocketAddr;
 use std::os::unix::ffi::OsStrExt;
 use std::sync::Arc;
 
+use hyper::server::conn::AddrStream;
+use hyper::service::{make_service_fn, service_fn};
+use hyper::{Body, Method, Request, Response, Server, StatusCode};
 use rusqlite::types::ToSql;
 use rusqlite::{Connection, Statement};
 use serde::Serialize;
 use serde_json::json;
-use threadpool::ThreadPool;
 
 use crate::audio_stream::AudioStream;
-use crate::http::{self, HttpError, HttpQuery, HttpRequest, HttpResponse};
-use crate::index::NodeType;
+use crate::http_util::HttpQuery;
+use crate::index::{NodeType, TrackLyrics};
 use crate::lyrics;
-use crate::media_image;
-use crate::server::{IncomingClient, IncomingResult, Receive, ServerIncoming};
-use crate::stream_thread::StreamThread;
+use crate::media;
 use crate::Musicd;
 
 #[derive(Debug)]
 pub enum Error {
-    HttpError(HttpError),
+    HyperError(hyper::Error),
     IoError(std::io::Error),
     DatabaseError(rusqlite::Error),
     ImageError(image::ImageError),
+}
+
+impl From<hyper::Error> for Error {
+    fn from(err: hyper::Error) -> Error {
+        Error::HyperError(err)
+    }
 }
 
 impl From<std::io::Error> for Error {
@@ -55,7 +61,7 @@ impl std::fmt::Display for Error {
 impl StdError for Error {
     fn description(&self) -> &str {
         match *self {
-            Error::HttpError(ref e) => e.description(),
+            Error::HyperError(ref e) => e.description(),
             Error::IoError(ref e) => e.description(),
             Error::DatabaseError(ref e) => e.description(),
             Error::ImageError(ref e) => e.description(),
@@ -63,152 +69,110 @@ impl StdError for Error {
     }
 }
 
-pub type Result<T> = std::result::Result<T, Error>;
+pub async fn run_api(musicd: Arc<crate::Musicd>, bind: SocketAddr) {
+    let make_service = make_service_fn(move |_socket: &AddrStream| {
+        let musicd = musicd.clone();
+        async move {
+            Ok::<_, hyper::Error>(service_fn(move |req: Request<Body>| {
+                process_request(req, musicd.clone())
+            }))
+        }
+    });
+
+    Server::bind(&bind)
+        .serve(make_service)
+        .await
+        .expect("running server failed");
+}
 
 struct ApiRequest {
-    request: HttpRequest,
+    request: Request<Body>,
     musicd: Arc<Musicd>,
-    client: Option<IncomingClient>,
+    query: HttpQuery,
 }
 
-impl ApiRequest {
-    fn err<T>(&self, code: i32, description: &str) -> Result<T> {
-        Err(Error::HttpError(HttpError::new(code, description)))
-    }
+async fn process_request(
+    request: Request<Body>,
+    musicd: Arc<Musicd>,
+) -> Result<Response<Body>, hyper::Error> {
+    let query = HttpQuery::from(request.uri().query().unwrap_or_default());
 
-    fn json(&self, json: &str) -> Result<HttpResponse> {
-        let mut response = HttpResponse::new();
+    let api_request = ApiRequest {
+        request,
+        musicd,
+        query,
+    };
 
-        response
-            .status("200 OK")
-            .content_type("application/json; charset=utf-8")
-            .text_body(json);
+    let result = match (
+        api_request.request.method(),
+        api_request.request.uri().path(),
+    ) {
+        (&Method::GET, "/api/musicd") => api_musicd(&api_request),
+        (&Method::GET, "/api/audio_stream") => api_audio_stream(&api_request),
+        (&Method::GET, "/api/image_file") => api_image_file(&api_request),
+        (&Method::GET, "/api/track_lyrics") => api_track_lyrics(&api_request),
+        (&Method::GET, "/api/nodes") => api_nodes(&api_request),
+        (&Method::GET, "/api/tracks") => api_tracks(&api_request),
+        (&Method::GET, "/api/artists") => api_artists(&api_request),
+        (&Method::GET, "/api/albums") => api_albums(&api_request),
+        (&Method::GET, "/api/images") => api_images(&api_request),
+        (&Method::GET, "/share") => res_share(&api_request),
+        _ => Ok(not_found()),
+    };
 
-        Ok(response)
-    }
-
-    fn take_client(&mut self) -> IncomingClient {
-        self.client.take().unwrap()
-    }
-}
-
-pub fn run_api(
-    musicd: Arc<crate::Musicd>,
-    bind: SocketAddr,
-    server: ServerIncoming,
-    stream_thread: Arc<StreamThread>,
-) {
-    let threadpool = ThreadPool::new(16);
-    let server = Arc::new(server);
-
-    info!("listening on {}", bind);
-
-    let tcp_listener = mio::net::TcpListener::bind(&bind).unwrap();
-    server.add_listener(tcp_listener).unwrap();
-
-    loop {
-        let incoming_result = server
-            .receive_next_fn(|b| match http::parse_request_headers(b) {
-                Ok(r) => match r {
-                    Some(r) => Receive::Receive(r),
-                    None => Receive::None,
-                },
-                Err(_) => {
-                    error!("invalid http headers");
-                    Receive::Invalid
-                }
-            })
-            .unwrap();
-
-        let mut api_request = match incoming_result {
-            IncomingResult::Request(client, request) => ApiRequest {
-                request,
-                musicd: musicd.clone(),
-                client: Some(client),
-            },
-            IncomingResult::Shutdown => {
-                break;
-            }
-        };
-
-        let stream_thread = stream_thread.clone();
-
-        threadpool.execute(move || {
-            debug!("request {}", api_request.request.full_path());
-
-            let result = match api_request.request.path() {
-                "/api/musicd" => api_musicd(&api_request),
-                "/api/audio_stream" => api_audio_stream(&mut api_request, &stream_thread),
-                "/api/image_file" => api_image_file(&api_request),
-                "/api/track_lyrics" => api_track_lyrics(&api_request),
-                "/api/nodes" => api_nodes(&api_request),
-                "/api/tracks" => api_tracks(&api_request),
-                "/api/artists" => api_artists(&api_request),
-                "/api/albums" => api_albums(&api_request),
-                "/api/images" => api_images(&api_request),
-                "/share" => res_share(&api_request),
-                _ => {
-                    let mut response = HttpResponse::new();
-                    response.status("404 Not Found").text_body("404 Not Found");
-
-                    Ok(response)
-                }
-            };
-
-            match result {
-                Ok(response) => {
-                    if let Some(client) = api_request.client {
-                        client.send(&response.to_bytes()).unwrap();
-                    }
-                }
-                Err(e) => {
-                    let response = match e {
-                        Error::HttpError(e) => {
-                            let mut response = HttpResponse::new();
-                            response.status(&e.to_string()).text_body(&e.to_string());
-                            response
-                        }
-                        _ => {
-                            error!("error processing request: {}", e.description());
-
-                            let mut response = HttpResponse::new();
-                            response
-                                .status("500 Internal Server Error")
-                                .text_body("500 Internal Server Error");
-                            response
-                        }
-                    };
-
-                    if let Some(client) = api_request.client {
-                        client.send(&response.to_bytes()).unwrap();
-                    } else {
-                        error!(
-                            "response stream already consumed when trying to send error response"
-                        );
-                    }
-                }
-            }
-
-            debug!("finish threadpool func");
-        });
+    match result {
+        Ok(res) => Ok(res),
+        Err(_e) => Ok(server_error()),
     }
 }
 
-fn api_musicd(r: &ApiRequest) -> Result<HttpResponse> {
-    r.json("{}")
+static BAD_REQUEST: &[u8] = b"Bad Request";
+static NOT_FOUND: &[u8] = b"Not Found";
+static INTERNAL_SERVER_ERROR: &[u8] = b"Internal Server Error";
+
+fn bad_request() -> Response<Body> {
+    Response::builder()
+        .status(StatusCode::BAD_REQUEST)
+        .body(BAD_REQUEST.into())
+        .unwrap()
 }
 
-fn api_audio_stream(r: &mut ApiRequest, stream_thread: &StreamThread) -> Result<HttpResponse> {
-    let track_id = match r.request.query().get_i64("track_id") {
+fn not_found() -> Response<Body> {
+    Response::builder()
+        .status(StatusCode::NOT_FOUND)
+        .body(NOT_FOUND.into())
+        .unwrap()
+}
+
+fn server_error() -> Response<Body> {
+    Response::builder()
+        .status(StatusCode::INTERNAL_SERVER_ERROR)
+        .body(INTERNAL_SERVER_ERROR.into())
+        .unwrap()
+}
+
+fn json_ok(json: &str) -> Response<Body> {
+    Response::builder()
+        .header("Content-Type", "application/json; charset=utf8")
+        .body(json.to_string().into())
+        .unwrap()
+}
+
+fn api_musicd(_: &ApiRequest) -> Result<Response<Body>, Error> {
+    Ok(json_ok("{}"))
+}
+
+fn api_audio_stream(r: &ApiRequest) -> Result<Response<Body>, Error> {
+    let track_id = match r.query.get_i64("track_id") {
         Some(id) => id,
         None => {
-            return r.err(400, "Bad Request");
+            return Ok(bad_request());
         }
     };
 
-    let start = r.request.query().get_i64("start").unwrap_or(0) as f64;
+    let start = r.query.get_i64("start").unwrap_or(0) as f64;
     if start < 0f64 {
-        return r.err(400, "Bad Request");
+        return Ok(bad_request());
     }
 
     let index = r.musicd.index();
@@ -216,7 +180,7 @@ fn api_audio_stream(r: &mut ApiRequest, stream_thread: &StreamThread) -> Result<
     let track = match index.track(track_id)? {
         Some(t) => t,
         None => {
-            return r.err(404, "Not Found");
+            return Ok(not_found());
         }
     };
 
@@ -245,31 +209,39 @@ fn api_audio_stream(r: &mut ApiRequest, stream_thread: &StreamThread) -> Result<
                 "can't open audio stream from '{}'",
                 fs_path.to_string_lossy()
             );
-            return r.err(500, "Internal Server Error");
+            return Ok(server_error());
         }
     };
 
-    stream_thread.add_audio_stream(r.take_client(), audio_stream)?;
+    let (sender, receiver) =
+        tokio::sync::mpsc::channel::<Result<Vec<u8>, Box<dyn StdError + Send + Sync>>>(5);
 
-    Ok(HttpResponse::new())
+    tokio::spawn(async move {
+        audio_stream.execute(sender).await;
+    });
+
+    Ok(Response::builder()
+        .header("Content-Type", "audio/mpeg")
+        .body(Body::wrap_stream(receiver))
+        .unwrap())
 }
 
-fn api_image_file(r: &ApiRequest) -> Result<HttpResponse> {
-    let image_id = match r.request.query().get_i64("image_id") {
+fn api_image_file(r: &ApiRequest) -> Result<Response<Body>, Error> {
+    let image_id = match r.query.get_i64("image_id") {
         Some(id) => id,
         None => {
-            return r.err(400, "Bad Request");
+            return Ok(bad_request());
         }
     };
 
-    let size = r.request.query().get_i64("size").unwrap_or(0);
+    let size = r.query.get_i64("size").unwrap_or(0);
 
     let index = r.musicd.index();
 
     let image = match index.image(image_id)? {
         Some(i) => i,
         None => {
-            return r.err(404, "Not Found");
+            return Ok(not_found());
         }
     };
 
@@ -283,16 +255,15 @@ fn api_image_file(r: &ApiRequest) -> Result<HttpResponse> {
         let fs_path = match index.map_fs_path(&node.path) {
             Some(p) => p,
             None => {
-                return r.err(404, "Not Found");
+                return Ok(not_found());
             }
         };
 
         let mut image_obj = if let Some(stream_index) = image.stream_index {
-            let image_data = match media_image::media_image_data_read(&fs_path, stream_index as i32)
-            {
+            let image_data = match media::media_image_data_read(&fs_path, stream_index as i32) {
                 Some(i) => i,
                 None => {
-                    return r.err(404, "Not Found");
+                    return Ok(not_found());
                 }
             };
 
@@ -317,17 +288,17 @@ fn api_image_file(r: &ApiRequest) -> Result<HttpResponse> {
         image_data
     };
 
-    let mut response = HttpResponse::new();
-    response.content_type("image/jpeg").bytes_body(&image_data);
-
-    Ok(response)
+    Ok(Response::builder()
+        .header("Content-Type", "image/jpeg")
+        .body(image_data.into())
+        .unwrap())
 }
 
-fn api_track_lyrics(r: &ApiRequest) -> Result<HttpResponse> {
-    let track_id = match r.request.query().get_i64("track_id") {
+fn api_track_lyrics(r: &ApiRequest) -> Result<Response<Body>, Error> {
+    let track_id = match r.query.get_i64("track_id") {
         Some(id) => id,
         None => {
-            return r.err(400, "Bad Request");
+            return Ok(bad_request());
         }
     };
 
@@ -336,7 +307,7 @@ fn api_track_lyrics(r: &ApiRequest) -> Result<HttpResponse> {
     let track = match index.track(track_id)? {
         Some(t) => t,
         None => {
-            return r.err(404, "Not Found");
+            return Ok(not_found());
         }
     };
 
@@ -345,14 +316,14 @@ fn api_track_lyrics(r: &ApiRequest) -> Result<HttpResponse> {
     } else {
         let track_lyrics = match lyrics::try_fetch_lyrics(&track.artist_name, &track.title) {
             Ok(lyrics) => match lyrics {
-                Some(l) => crate::index::TrackLyrics {
+                Some(l) => TrackLyrics {
                     track_id,
                     lyrics: Some(l.lyrics),
                     provider: Some(l.provider),
                     source: Some(l.source),
                     modified: 0,
                 },
-                None => crate::index::TrackLyrics {
+                None => TrackLyrics {
                     track_id,
                     lyrics: None,
                     provider: None,
@@ -362,14 +333,14 @@ fn api_track_lyrics(r: &ApiRequest) -> Result<HttpResponse> {
             },
             Err(e) => {
                 error!("fetching lyrics failed: {}", e.description());
-                return r.err(500, "Internal Server Error");
+                return Ok(server_error());
             }
         };
 
         index.set_track_lyrics(&track_lyrics)?
     };
 
-    r.json(
+    Ok(json_ok(
         &json!({
             "track_id": lyrics.track_id,
             "lyrics": lyrics.lyrics,
@@ -378,7 +349,7 @@ fn api_track_lyrics(r: &ApiRequest) -> Result<HttpResponse> {
             "modified": lyrics.modified,
         })
         .to_string(),
-    )
+    ))
 }
 
 struct QueryOptions {
@@ -455,7 +426,7 @@ impl QueryOptions {
         }
     }
 
-    pub fn get_total(&self, conn: &Connection, select_from: &str) -> Result<i64> {
+    pub fn get_total(&self, conn: &Connection, select_from: &str) -> Result<i64, rusqlite::Error> {
         let mut sql = select_from.to_string();
 
         if !self.clauses.is_empty() {
@@ -472,7 +443,7 @@ impl QueryOptions {
         mut self,
         conn: &'a Connection,
         select_from: &str,
-    ) -> Result<(Statement<'a>, Vec<Box<dyn ToSql>>)> {
+    ) -> Result<(Statement<'a>, Vec<Box<dyn ToSql>>), rusqlite::Error> {
         let mut sql = select_from.to_string();
 
         if !self.clauses.is_empty() {
@@ -514,8 +485,8 @@ struct NodeItem {
     all_image_count: i64,
 }
 
-fn api_nodes(r: &ApiRequest) -> Result<HttpResponse> {
-    let query = r.request.query();
+fn api_nodes(r: &ApiRequest) -> Result<Response<Body>, Error> {
+    let query = &r.query;
     let mut opts = QueryOptions::new();
 
     if let Some(parent_id) = query.get_str("parent_id") {
@@ -591,13 +562,13 @@ fn api_nodes(r: &ApiRequest) -> Result<HttpResponse> {
         });
     }
 
-    r.json(
+    Ok(json_ok(
         &json!({
             "total": total,
             "items": items
         })
         .to_string(),
-    )
+    ))
 }
 
 #[derive(Serialize)]
@@ -613,8 +584,8 @@ struct TrackItem {
     length: f64,
 }
 
-fn api_tracks(r: &ApiRequest) -> Result<HttpResponse> {
-    let query = r.request.query();
+fn api_tracks(r: &ApiRequest) -> Result<Response<Body>, Error> {
+    let query = &r.query;
     let mut opts = QueryOptions::new();
 
     opts.bind_filter_i64(&query, "track_id", "Track.track_id = ?");
@@ -688,13 +659,13 @@ fn api_tracks(r: &ApiRequest) -> Result<HttpResponse> {
         });
     }
 
-    r.json(
+    Ok(json_ok(
         &json!({
             "total": total,
             "items": items
         })
         .to_string(),
-    )
+    ))
 }
 
 #[derive(Serialize)]
@@ -704,8 +675,8 @@ struct ArtistItem {
     track_count: i64,
 }
 
-fn api_artists(r: &ApiRequest) -> Result<HttpResponse> {
-    let query = r.request.query();
+fn api_artists(r: &ApiRequest) -> Result<Response<Body>, Error> {
+    let query = &r.query;
     let mut opts = QueryOptions::new();
 
     opts.bind_filter_i64(&query, "artist_id", "Artist.artist_id = ?");
@@ -740,13 +711,13 @@ fn api_artists(r: &ApiRequest) -> Result<HttpResponse> {
         });
     }
 
-    r.json(
+    Ok(json_ok(
         &json!({
             "total": total,
             "items": items
         })
         .to_string(),
-    )
+    ))
 }
 
 #[derive(Serialize)]
@@ -759,8 +730,8 @@ struct AlbumItem {
     track_count: i64,
 }
 
-fn api_albums(r: &ApiRequest) -> Result<HttpResponse> {
-    let query = r.request.query();
+fn api_albums(r: &ApiRequest) -> Result<Response<Body>, Error> {
+    let query = &r.query;
     let mut opts = QueryOptions::new();
 
     opts.bind_filter_i64(&query, "album_id", "Album.album_id = ?");
@@ -814,13 +785,13 @@ fn api_albums(r: &ApiRequest) -> Result<HttpResponse> {
         });
     }
 
-    r.json(
+    Ok(json_ok(
         &json!({
             "total": total,
             "items": items
         })
         .to_string(),
-    )
+    ))
 }
 
 #[derive(Serialize)]
@@ -830,8 +801,8 @@ struct ImageItem {
     description: String,
 }
 
-fn api_images(r: &ApiRequest) -> Result<HttpResponse> {
-    let query = r.request.query();
+fn api_images(r: &ApiRequest) -> Result<Response<Body>, Error> {
+    let query = &r.query;
     let mut opts = QueryOptions::new();
 
     opts.bind_filter_i64(&query, "image_id", "Image.image_id = ?");
@@ -867,22 +838,20 @@ fn api_images(r: &ApiRequest) -> Result<HttpResponse> {
         });
     }
 
-    r.json(
+    Ok(json_ok(
         &json!({
             "total": total,
             "items": items
         })
         .to_string(),
-    )
+    ))
 }
 
-fn res_share(_r: &ApiRequest) -> Result<HttpResponse> {
-    let mut response = HttpResponse::new();
+static SHARE_HTML: &[u8] = include_bytes!("./share.html");
 
-    response
-        .status("200 OK")
-        .content_type("text/html; charset=utf-8")
-        .bytes_body(include_bytes!("./share.html"));
-
-    Ok(response)
+fn res_share(_r: &ApiRequest) -> Result<Response<Body>, Error> {
+    Ok(Response::builder()
+        .header("Content-Type", "text/html; charset=utf-8")
+        .body(SHARE_HTML.into())
+        .unwrap())
 }

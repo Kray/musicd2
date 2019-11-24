@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use crate::cue;
 use crate::index::{Image, Index, Node, NodeType, Track};
-use crate::media_info;
+use crate::media;
 
 #[derive(Debug)]
 pub enum Error {
@@ -445,7 +445,7 @@ impl Scan {
                 Err(_) => continue,
             };
 
-            let file_tracks = match media_info::media_info_from_path(&file_node.fs_path) {
+            let file_tracks = match media::media_info_from_path(&file_node.fs_path) {
                 Some(t) => t.0,
                 None => continue,
             };
@@ -586,7 +586,7 @@ impl Scan {
     fn try_process_audio_file(&mut self, node: &Node, fs_path: &Path) -> Result<Option<ScanStat>> {
         debug!("try audio file '{}'", fs_path.to_string_lossy());
 
-        let (mut tracks, mut images) = match media_info::media_info_from_path(&fs_path) {
+        let (mut tracks, mut images) = match media::media_info_from_path(&fs_path) {
             Some(m) => m,
             None => return Ok(None),
         };
