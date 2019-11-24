@@ -1,18 +1,6 @@
 use std::result::Result;
 
-use curl::{
-    easy::{Easy2, Handler, WriteError},
-    Error,
-};
-
-struct Collector(Vec<u8>);
-
-impl Handler for Collector {
-    fn write(&mut self, data: &[u8]) -> Result<usize, WriteError> {
-        self.0.extend_from_slice(data);
-        Ok(data.len())
-    }
-}
+use reqwest::Error;
 
 #[derive(Debug)]
 pub struct Lyrics {
@@ -21,29 +9,57 @@ pub struct Lyrics {
     pub source: String,
 }
 
-pub fn try_fetch_lyrics(artist: &str, title: &str) -> Result<Option<Lyrics>, Error> {
-    let mut curl = Easy2::new(Collector(Vec::new()));
+pub async fn try_fetch_lyrics(artist: &str, title: &str) -> Result<Option<Lyrics>, Error> {
+    Ok(try_lyricwiki_lyrics(artist, title).await?)
+}
 
+async fn try_lyricwiki_lyrics(artist: &str, title: &str) -> Result<Option<Lyrics>, Error> {
+    // Try exact page
     let url = &format!("https://lyrics.fandom.com/wiki/{}:{}", artist, title);
-
-    debug!("fetching url {}", url);
-
-    curl.url(url)?;
-    curl.follow_location(true)?;
-    curl.max_redirections(10)?;
-    curl.perform()?;
-
-    let body = curl.get_ref();
-    let body = String::from_utf8_lossy(&body.0);
-
-    Ok(match parse_lyricwiki_lyrics(&body) {
-        Some(lyrics) => Some(Lyrics {
-            lyrics,
+    debug!("fetching url {}", &url);
+    if let Some(l) = parse_lyricwiki_lyrics(&reqwest::get(url).await?.text().await?) {
+        return Ok(Some(Lyrics {
+            lyrics: l,
             provider: "LyricWiki".to_owned(),
             source: url.to_string(),
-        }),
-        None => None,
-    })
+        }));
+    }
+
+    // Fetch list of all pages associated with this artist
+    let url = &format!(
+        "http://lyrics.wikia.com/api.php?func=getArtist&artist={}&fmt=text",
+        artist
+    );
+    debug!("fetching url {}", url);
+    let song_list = reqwest::get(url).await?.text().await?;
+
+    // Try to find the exact page name
+    if let Some(t) = song_list.split('\n').find(|t| t.ends_with(title)) {
+        let url = &format!("https://lyrics.fandom.com/wiki/{}", t);
+        debug!("fetching url {}", url);
+        if let Some(l) = parse_lyricwiki_lyrics(&reqwest::get(url).await?.text().await?) {
+            return Ok(Some(Lyrics {
+                lyrics: l,
+                provider: "LyricWiki".to_owned(),
+                source: url.to_string(),
+            }));
+        }
+    }
+
+    // Try to find the primary artist name and use it
+    if let Some(artist) = song_list.split(':').next() {
+        let url = &format!("https://lyrics.fandom.com/wiki/{}:{}", artist, title);
+        debug!("fetching url {}", url);
+        if let Some(l) = parse_lyricwiki_lyrics(&reqwest::get(url).await?.text().await?) {
+            return Ok(Some(Lyrics {
+                lyrics: l,
+                provider: "LyricWiki".to_owned(),
+                source: url.to_string(),
+            }));
+        }
+    }
+
+    Ok(None)
 }
 
 fn parse_lyricwiki_lyrics(body: &str) -> Option<String> {
@@ -111,13 +127,4 @@ fn parse_lyricwiki_lyrics(body: &str) -> Option<String> {
     }
 
     Some(result)
-}
-
-#[test]
-fn test1() {
-    let lyrics = try_fetch_lyrics("TWRP", "ICQ").unwrap().unwrap();
-    println!("{}", lyrics.lyrics);
-
-    let lyrics = try_fetch_lyrics("広瀬香美", "Promise").unwrap().unwrap();
-    println!("{}", lyrics.lyrics);
 }

@@ -171,7 +171,8 @@ async fn process_request(
     }
 
     if let Some(auth_password) = api_request.cookies.get("musicd2-auth") {
-        if api_request.musicd.password != *auth_password {
+        if !api_request.musicd.password.is_empty() && api_request.musicd.password != *auth_password
+        {
             debug!("invalid auth");
             return Ok(unauthorized());
         }
@@ -183,7 +184,7 @@ async fn process_request(
     ) {
         (&Method::GET, "/api/audio_stream") => api_audio_stream(&api_request),
         (&Method::GET, "/api/image_file") => api_image_file(&api_request),
-        (&Method::GET, "/api/track_lyrics") => api_track_lyrics(&api_request),
+        (&Method::GET, "/api/track_lyrics") => api_track_lyrics(&api_request).await,
         (&Method::GET, "/api/nodes") => api_nodes(&api_request),
         (&Method::GET, "/api/tracks") => api_tracks(&api_request),
         (&Method::GET, "/api/artists") => api_artists(&api_request),
@@ -363,7 +364,7 @@ fn api_image_file(r: &ApiRequest) -> Result<Response<Body>, Error> {
         .unwrap())
 }
 
-fn api_track_lyrics(r: &ApiRequest) -> Result<Response<Body>, Error> {
+async fn api_track_lyrics(r: &ApiRequest) -> Result<Response<Body>, Error> {
     let track_id = match r.query.get_i64("track_id") {
         Some(id) => id,
         None => {
@@ -371,42 +372,48 @@ fn api_track_lyrics(r: &ApiRequest) -> Result<Response<Body>, Error> {
         }
     };
 
-    let index = r.musicd.index();
+    let (track, lyrics) = {
+        let index = r.musicd.index();
 
-    let track = match index.track(track_id)? {
-        Some(t) => t,
-        None => {
-            return Ok(not_found());
-        }
+        (
+            match index.track(track_id)? {
+                Some(t) => t,
+                None => {
+                    return Ok(not_found());
+                }
+            },
+            index.track_lyrics(track_id)?,
+        )
     };
 
-    let lyrics = if let Some(track_lyrics) = index.track_lyrics(track_id)? {
-        track_lyrics
-    } else {
-        let track_lyrics = match lyrics::try_fetch_lyrics(&track.artist_name, &track.title) {
-            Ok(lyrics) => match lyrics {
-                Some(l) => TrackLyrics {
-                    track_id,
-                    lyrics: Some(l.lyrics),
-                    provider: Some(l.provider),
-                    source: Some(l.source),
-                    modified: 0,
+    let lyrics = match lyrics {
+        Some(lyrics) => lyrics,
+        None => {
+            let lyrics = match lyrics::try_fetch_lyrics(&track.artist_name, &track.title).await {
+                Ok(lyrics) => match lyrics {
+                    Some(l) => TrackLyrics {
+                        track_id,
+                        lyrics: Some(l.lyrics),
+                        provider: Some(l.provider),
+                        source: Some(l.source),
+                        modified: 0,
+                    },
+                    None => TrackLyrics {
+                        track_id,
+                        lyrics: None,
+                        provider: None,
+                        source: None,
+                        modified: 0,
+                    },
                 },
-                None => TrackLyrics {
-                    track_id,
-                    lyrics: None,
-                    provider: None,
-                    source: None,
-                    modified: 0,
-                },
-            },
-            Err(e) => {
-                error!("fetching lyrics failed: {}", e.description());
-                return Ok(server_error());
-            }
-        };
+                Err(e) => {
+                    error!("fetching lyrics failed: {}", e.description());
+                    return Ok(server_error());
+                }
+            };
 
-        index.set_track_lyrics(&track_lyrics)?
+            r.musicd.index().set_track_lyrics(&lyrics)?
+        }
     };
 
     Ok(json_ok(
