@@ -4,7 +4,7 @@ use std::os::raw::{c_int, c_void};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-use bytes::BytesMut;
+use bytes::{BytesMut, buf::ext::BufExt};
 use tokio::sync::mpsc::Sender;
 
 use crate::musicd_c;
@@ -94,7 +94,8 @@ impl AudioStream {
             trace!("read {} bytes from audio stream, feeding", buf.len());
 
             let result = if result {
-                sender.send(Ok(buf.take().to_vec())).await
+                let len = buf.len();
+                sender.send(Ok(buf.take(len).into_inner().to_vec())).await
             } else {
                 debug!("audio stream finished, flushing channel");
                 let _ = sender.send(Ok(vec![])).await;
